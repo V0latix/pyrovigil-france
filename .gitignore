@@ -3,7 +3,6 @@ __pycache__/
 .venv/
 .env
 *.db
-uv.lock
 
 # Données téléchargées (voir `pyrovigil fetch-data`), sauf les fixtures de test
 data/*
