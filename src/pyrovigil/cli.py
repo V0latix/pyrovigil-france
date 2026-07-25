@@ -92,6 +92,35 @@ def cmd_ingest(args: argparse.Namespace) -> int:
     return 0
 
 
+def cmd_export(args: argparse.Namespace) -> int:
+    """Écrit la carte et ses données en fichiers statiques, prêts pour n'importe quel hébergeur.
+
+    ponytail: réutilise directement les fonctions de l'API. La page charge toute la fenêtre disponible et
+    filtre dans le navigateur, donc un seul fichier par couche suffit — pas un par plage horaire.
+    """
+    import json
+    import shutil
+
+    from . import api
+
+    out = Path(args.out)
+    out.mkdir(parents=True, exist_ok=True)
+    conn = db.connect(args.database)
+
+    for name, payload in [
+        # min_priority explicite : appelées hors FastAPI, les valeurs par défaut restent des objets Query
+        ("events.geojson", api.events_geojson(hours=api.EXPORT_HOURS, min_priority="low", conn=conn)),
+        ("hotspots.geojson", api.hotspots_geojson(hours=api.EXPORT_HOURS, conn=conn)),
+    ]:
+        (out / name).write_text(json.dumps(payload), encoding="utf-8")
+        print(f"{name} : {len(payload['features'])} entités")
+
+    shutil.copy(api.STATIC_DIR / "index.html", out / "index.html")
+    conn.close()
+    print(f"Export statique dans {out}/")
+    return 0
+
+
 def cmd_serve(args: argparse.Namespace) -> int:
     import uvicorn
 
@@ -118,6 +147,10 @@ def main(argv: list[str] | None = None) -> int:
     ingest.add_argument("--loop", type=int, metavar="SECONDES", help="répète indéfiniment")
     ingest.add_argument("--no-alerts", action="store_true", help="n'envoie aucune alerte")
     ingest.set_defaults(func=cmd_ingest)
+
+    export = sub.add_parser("export", help="génère la carte en fichiers statiques")
+    export.add_argument("--out", default="dist", help="dossier de sortie (défaut : dist)")
+    export.set_defaults(func=cmd_export)
 
     serve = sub.add_parser("serve", help="lance l'API et la carte")
     serve.add_argument("--host", default="127.0.0.1")

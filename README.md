@@ -47,6 +47,7 @@ Pour une surveillance continue, une ligne de cron suffit — la commande est ide
 | `pyrovigil ingest --fixture` | idem sur le CSV local, sans clé API |
 | `pyrovigil ingest --loop 600` | répète toutes les 10 minutes |
 | `pyrovigil ingest --no-alerts` | ingère sans rien envoyer |
+| `pyrovigil export` | génère `dist/` : carte et données en fichiers statiques |
 | `pyrovigil serve` | API REST et carte |
 
 ## API
@@ -65,6 +66,56 @@ Pour une surveillance continue, une ligne de cron suffit — la commande est ide
 
 Les routes `/admin/*` déclenchent des appels réseau sortants. Elles exigent l'en-tête `X-Admin-Token` et
 restent **désactivées** tant que `PYROVIGIL_ADMIN_TOKEN` n'est pas défini. Documentation interactive sur `/docs`.
+
+## Déploiement gratuit
+
+Le dépôt s'héberge tout seul, sans serveur ni base managée. Le workflow
+[`.github/workflows/ingest.yml`](.github/workflows/ingest.yml) tourne toutes les heures :
+
+```
+récupère pyrovigil.db depuis la Release « data »
+  └─ pyrovigil ingest        (FIRMS → localisation → clustering → score → alertes)
+      └─ pyrovigil export    (events.geojson + hotspots.geojson + index.html)
+          ├─ renvoie pyrovigil.db dans la Release
+          └─ déploie dist/ sur Vercel
+```
+
+La base SQLite vit comme **asset d'une Release GitHub** : mutable, gratuit, et sans impact sur l'historique
+git — un `.db` commité ajouterait plusieurs mégaoctets de binaire à chaque passage.
+
+La carte exportée charge 7 jours de données en une fois et filtre dans le navigateur. Elle n'a donc besoin
+d'aucun backend : les fichiers statiques suffisent, et la même page fonctionne servie par `pyrovigil serve`.
+
+### Secrets à configurer
+
+| Secret | Nécessaire ? | Rôle |
+|---|---|---|
+| `FIRMS_MAP_KEY` | **oui** | sans elle, l'ingestion échoue |
+| `VERCEL_TOKEN`, `VERCEL_ORG_ID`, `VERCEL_PROJECT_ID` | non | sans eux, l'export part en artefact du workflow au lieu d'être déployé |
+| `DISCORD_WEBHOOK_URL` | non | sans lui, les alertes sont seulement journalisées |
+
+```bash
+gh secret set FIRMS_MAP_KEY
+gh secret set VERCEL_TOKEN        # https://vercel.com/account/tokens
+```
+
+`VERCEL_ORG_ID` et `VERCEL_PROJECT_ID` se récupèrent dans `.vercel/project.json` après un `vercel link` local.
+
+### Pourquoi pas le cron Vercel
+
+Le plan Hobby limite les cron jobs à **une exécution par jour**, et une expression plus fréquente fait
+échouer le déploiement. GitHub Actions descend à 5 minutes, gratuitement. Une cadence horaire est de toute
+façon largement suffisante : la latence FIRMS mesurée est de 4 à 5 heures.
+
+### Deux limites à connaître
+
+**La base grossit d'environ 1 Mo par jour** (1800 hotspots quotidiens). Elle est téléchargée et renvoyée à
+chaque exécution : vers 6 mois de collecte, ce va-et-vient devient coûteux. Il faudra alors soit purger les
+`raw_hotspots` au-delà de N jours, soit passer sur Postgres (Neon a une offre gratuite) — la bascule ne
+touche que `db.py` et les requêtes de `api.py`.
+
+**Les workflows planifiés sont désactivés après 60 jours sans activité sur le dépôt.** Sur un projet
+saisonnier, pensez à un commit de temps en temps hors saison.
 
 ## Le score
 
@@ -120,8 +171,8 @@ requêtes de `api.py`.
 uv run python tests/test_pyrovigil.py    # tourne aussi sous pytest
 ```
 
-23 vérifications : parsing FIRMS, déduplication, filtre France, distance à la forêt, clustering,
-stabilité des identifiants d'événements, barème de score, anti-spam.
+24 vérifications : parsing FIRMS, déduplication, tolérance aux pannes de source, filtre France, distance à
+la forêt, clustering, stabilité des identifiants d'événements, barème de score, anti-spam.
 
 ## Limites
 

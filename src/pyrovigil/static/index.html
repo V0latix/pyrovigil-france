@@ -109,7 +109,14 @@
 const COLORS = { critical: '#d00000', high: '#ff7b00', medium: '#ffd000', low: '#7d8592' };
 const EMPTY = { type: 'FeatureCollection', features: [] };
 
+// Les deux fichiers sont chargés une fois sur toute la fenêtre disponible (7 jours) et filtrés dans le
+// navigateur. La page fonctionne donc à l'identique servie par l'API ou déposée en fichiers statiques —
+// un hébergeur statique ignore simplement la query string.
+const WINDOW_HOURS = 168;
+
 let hours = 24;
+let allEvents = [];
+let allHotspots = [];
 let events = [];
 
 const map = new maplibregl.Map({
@@ -190,24 +197,40 @@ map.on('load', () => {
 async function refresh() {
   try {
     const [eventsGeo, hotspotsGeo] = await Promise.all([
-      fetch(`/events.geojson?hours=${hours}`).then(r => r.json()),
-      fetch(`/hotspots.geojson?hours=${hours}`).then(r => r.json())
+      fetch(`events.geojson?hours=${WINDOW_HOURS}`).then(r => r.json()),
+      fetch(`hotspots.geojson?hours=${WINDOW_HOURS}`).then(r => r.json())
     ]);
-    map.getSource('events').setData(eventsGeo);
-    map.getSource('hotspots').setData(hotspotsGeo);
-    events = eventsGeo.features.map(f => f.properties);
-    renderList();
-    document.getElementById('status').textContent =
-      `${events.length} événement(s), ${hotspotsGeo.features.length} point(s) bruts · ` +
-      `mis à jour à ${new Date().toLocaleTimeString('fr-FR')}`;
+    allEvents = eventsGeo.features;
+    allHotspots = hotspotsGeo.features;
+    render();
   } catch (err) {
     document.getElementById('status').textContent = `Erreur de chargement : ${err.message}`;
   }
 }
 
+function render() {
+  const cutoff = Date.now() - hours * 3600000;
+  const eventFeatures = allEvents.filter(f => utc(f.properties.last_seen) >= cutoff);
+  const hotspotFeatures = allHotspots.filter(f => utc(f.properties.acquisition_time) >= cutoff);
+
+  map.getSource('events').setData({ type: 'FeatureCollection', features: eventFeatures });
+  map.getSource('hotspots').setData({ type: 'FeatureCollection', features: hotspotFeatures });
+  events = eventFeatures.map(f => f.properties);
+  renderList();
+
+  const latest = allEvents.length ? Math.max(...allEvents.map(f => utc(f.properties.last_seen))) : null;
+  document.getElementById('status').textContent =
+    `${events.length} événement(s), ${hotspotFeatures.length} point(s) bruts · ` +
+    (latest ? `détection la plus récente ${ago(new Date(latest).toISOString())}` : 'aucune donnée');
+}
+
+// les dates de l'API sont en UTC, sans suffixe de fuseau
+function utc(iso) {
+  return new Date(iso.replace(' ', 'T').replace(/Z?$/, 'Z')).getTime();
+}
+
 function ago(iso) {
-  // les dates de l'API sont en UTC, sans suffixe de fuseau
-  const minutes = Math.max(0, (Date.now() - new Date(iso.replace(' ', 'T') + 'Z')) / 60000);
+  const minutes = Math.max(0, (Date.now() - utc(iso)) / 60000);
   if (minutes < 60) return `il y a ${Math.round(minutes)} min`;
   if (minutes < 1440) return `il y a ${Math.round(minutes / 60)} h`;
   return `il y a ${Math.round(minutes / 1440)} j`;
@@ -253,8 +276,7 @@ function renderList() {
 }
 
 function coordsOf(id) {
-  const feature = map.getSource('events')._data.features.find(f => f.properties.id === id);
-  return feature.geometry.coordinates;
+  return allEvents.find(f => f.properties.id === id).geometry.coordinates;
 }
 
 function openPopup(properties) {
@@ -293,7 +315,7 @@ document.getElementById('ranges').onclick = (e) => {
   for (const other of document.querySelectorAll('button.range')) {
     other.setAttribute('aria-pressed', String(other === button));
   }
-  refresh();
+  render();  // pas de nouvel appel réseau : les données sont déjà là
 };
 
 document.getElementById('show-hotspots').onchange = (e) => {

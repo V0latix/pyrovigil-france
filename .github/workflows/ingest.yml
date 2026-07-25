@@ -1,0 +1,103 @@
+name: Ingestion FIRMS
+
+# Toutes les heures. La latence FIRMS mesurée est de l'ordre de 4 à 5 heures : poller plus souvent
+# n'apporterait rien. Décalé de l'heure pile, où GitHub retarde le plus les tâches planifiées.
+on:
+  schedule:
+    - cron: "17 * * * *"
+  workflow_dispatch:
+    inputs:
+      days:
+        description: "Fenêtre FIRMS en jours"
+        default: "1"
+
+# Deux ingestions simultanées écriraient la même base : la seconde attend au lieu d'écraser.
+concurrency:
+  group: ingest
+  cancel-in-progress: false
+
+permissions:
+  contents: write # nécessaire pour mettre à jour l'asset de release qui porte la base
+
+env:
+  DB_RELEASE: data # release technique, distincte des releases de version
+  VERCEL_TOKEN: ${{ secrets.VERCEL_TOKEN }}
+
+jobs:
+  ingest:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: astral-sh/setup-uv@v5
+        with:
+          enable-cache: true
+
+      # Les contours des départements ne changent jamais : on évite de solliciter le serveur 24 fois par jour.
+      - name: Couches géographiques (cache)
+        uses: actions/cache@v4
+        with:
+          path: data/departements.geojson
+          key: departements-v1
+
+      - name: Télécharge les départements si absents du cache
+        run: test -f data/departements.geojson || uv run pyrovigil fetch-data
+
+      - name: Récupère la base de l'exécution précédente
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          if gh release download "$DB_RELEASE" --pattern pyrovigil.db --clobber 2>/dev/null; then
+            echo "Base récupérée : $(du -h pyrovigil.db | cut -f1)"
+          else
+            echo "Aucune base précédente, démarrage à vide"
+          fi
+
+      - name: Ingestion, clustering, scoring, alertes
+        env:
+          FIRMS_MAP_KEY: ${{ secrets.FIRMS_MAP_KEY }}
+          DISCORD_WEBHOOK_URL: ${{ secrets.DISCORD_WEBHOOK_URL }}
+          # jamais interpolé directement dans la commande : argparse rejette ensuite tout ce qui n'est pas entier
+          DAYS: ${{ inputs.days || '1' }}
+        run: uv run pyrovigil ingest --days "$DAYS"
+
+      - name: Export statique
+        run: uv run pyrovigil export
+
+      # Sauvegarde avant déploiement : si Vercel échoue, l'état de la base est déjà préservé et la
+      # déduplication ne repartira pas de zéro à l'exécution suivante.
+      - name: Sauvegarde la base
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          gh release view "$DB_RELEASE" >/dev/null 2>&1 || \
+            gh release create "$DB_RELEASE" --prerelease --title "Base de données" \
+              --notes "Base SQLite de production, écrasée à chaque ingestion. Ce n'est pas une release de version."
+          gh release upload "$DB_RELEASE" pyrovigil.db --clobber
+
+      - name: Déploiement Vercel
+        if: env.VERCEL_TOKEN != ''
+        env:
+          VERCEL_ORG_ID: ${{ secrets.VERCEL_ORG_ID }}
+          VERCEL_PROJECT_ID: ${{ secrets.VERCEL_PROJECT_ID }}
+        run: npx --yes vercel@latest deploy dist --prod --yes --token "$VERCEL_TOKEN"
+
+      - name: Résumé
+        run: |
+          {
+            echo "### Ingestion $(date -u '+%Y-%m-%d %H:%M UTC')"
+            echo ""
+            echo "- base : $(du -h pyrovigil.db | cut -f1)"
+            echo "- événements exportés : $(python3 -c "import json;print(len(json.load(open('dist/events.geojson'))['features']))")"
+            echo "- hotspots exportés : $(python3 -c "import json;print(len(json.load(open('dist/hotspots.geojson'))['features']))")"
+            [ -n "$VERCEL_TOKEN" ] || echo "- Vercel : non configuré (secret VERCEL_TOKEN absent), export disponible en artefact"
+          } >> "$GITHUB_STEP_SUMMARY"
+
+      - name: Publie l'export en artefact
+        if: env.VERCEL_TOKEN == ''
+        uses: actions/upload-artifact@v4
+        with:
+          name: carte
+          path: dist/
+          retention-days: 7

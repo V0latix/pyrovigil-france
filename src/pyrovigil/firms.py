@@ -12,12 +12,15 @@ from __future__ import annotations
 import csv
 import io
 import json
+import logging
 import sqlite3
 import time
 import urllib.error
 import urllib.request
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
+
+logger = logging.getLogger("pyrovigil.firms")
 
 API_BASE = "https://firms.modaps.eosdis.nasa.gov/api/area/csv"
 
@@ -36,7 +39,7 @@ class FirmsError(RuntimeError):
     pass
 
 
-def _get(url: str, timeout: int = 30, attempts: int = 3) -> str:
+def _get(url: str, timeout: int = 60, attempts: int = 3) -> str:
     """GET avec retry et backoff exponentiel — FIRMS renvoie régulièrement des 429/503."""
     last: Exception | None = None
     for attempt in range(attempts):
@@ -149,10 +152,23 @@ def insert_hotspots(conn: sqlite3.Connection, rows: list[dict]) -> int:
 
 
 def ingest(conn: sqlite3.Connection, map_key: str, day_range: int = 1) -> int:
-    """Interroge toutes les sources FIRMS et stocke les nouveaux hotspots."""
-    rows = []
+    """Interroge toutes les sources FIRMS et stocke les nouveaux hotspots.
+
+    Une source injoignable ne fait pas échouer les autres : FIRMS a des indisponibilités passagères et
+    limite le débit par clé. Les trois quarts des données valent mieux que rien, d'autant que les sources
+    se recouvrent largement. En revanche, si *toutes* échouent, on lève : un job planifié doit échouer
+    bruyamment plutôt que de laisser croire qu'il n'y a pas de feu.
+    """
+    rows, failures = [], []
     for source in SOURCES:
-        rows.extend(parse_csv(fetch_csv(source, map_key, day_range), source))
+        try:
+            rows.extend(parse_csv(fetch_csv(source, map_key, day_range), source))
+        except FirmsError as exc:
+            failures.append(source)
+            logger.warning("source FIRMS %s indisponible : %s", source, exc)
+
+    if len(failures) == len(SOURCES):
+        raise FirmsError(f"toutes les sources FIRMS ont échoué : {', '.join(failures)}")
     return insert_hotspots(conn, rows)
 
 

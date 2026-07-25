@@ -127,6 +127,34 @@ def test_sans_couche_foret():
         assert index.locate(43.15, 6.35)["in_forest"] is None
 
 
+def test_une_source_firms_en_panne_ne_bloque_pas_les_autres():
+    conn = db.connect(":memory:")
+    csv_texte = FIXTURE.read_text()
+    appels = []
+
+    def fetch_capricieux(source, map_key, day_range, bbox=firms.BBOX_FRANCE):
+        appels.append(source)
+        if source in ("VIIRS_NOAA20_NRT", "MODIS_NRT"):
+            raise firms.FirmsError("simulation d'indisponibilité")
+        return csv_texte
+
+    original = firms.fetch_csv
+    firms.fetch_csv = fetch_capricieux
+    try:
+        assert firms.ingest(conn, "cle-factice") == 8, "les sources valides doivent être ingérées"
+        assert len(appels) == 4, "toutes les sources sont tentées"
+
+        # si tout échoue en revanche, l'ingestion doit lever : un job planifié doit échouer bruyamment
+        firms.fetch_csv = lambda *a, **k: (_ for _ in ()).throw(firms.FirmsError("tout est tombé"))
+        try:
+            firms.ingest(db.connect(":memory:"), "cle-factice")
+            raise AssertionError("une panne totale doit lever FirmsError")
+        except firms.FirmsError:
+            pass
+    finally:
+        firms.fetch_csv = original
+
+
 def _hotspot(lat, lon, minutes_ago=0, satellite="N", frp=50.0, confidence="high", **extra):
     """Hotspot minimal pour les tests de clustering et de scoring."""
     return {

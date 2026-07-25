@@ -21,6 +21,9 @@ STATIC_DIR = Path(__file__).parent / "static"
 
 PRIORITY_ORDER = {"low": 0, "medium": 1, "high": 2, "critical": 3}
 
+# Fenêtre des exports statiques. La carte charge ce volume une fois et filtre côté navigateur.
+EXPORT_HOURS = 168
+
 app = FastAPI(
     title="PyroVigil France API",
     description=(
