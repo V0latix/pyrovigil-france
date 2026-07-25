@@ -21,12 +21,15 @@ permissions:
 
 env:
   DB_RELEASE: data # release technique, distincte des releases de version
-  VERCEL_TOKEN: ${{ secrets.VERCEL_TOKEN }}
 
 jobs:
   ingest:
     runs-on: ubuntu-latest
     timeout-minutes: 15
+    # au niveau job, pas au niveau workflow : le contexte `secrets` n'est pas disponible plus haut,
+    # `env.VERCEL_TOKEN` y resterait vide et l'étape de déploiement serait toujours sautée
+    env:
+      VERCEL_TOKEN: ${{ secrets.VERCEL_TOKEN }}
     steps:
       - uses: actions/checkout@v4
 
