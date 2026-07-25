@@ -15,7 +15,7 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "src"))
 
-from pyrovigil import db, events, firms, geo  # noqa: E402
+from pyrovigil import db, events, firms, geo, scoring  # noqa: E402
 
 ROOT = Path(__file__).resolve().parents[1]
 FIXTURE = ROOT / "data" / "firms_sample.csv"
@@ -218,6 +218,76 @@ def test_rebuild_events_est_idempotent_et_stable():
     assert maures["hotspot_count"] == 4
     assert maures["source_count"] == 2
     assert maures["max_frp"] == 118.6
+
+
+def _event(**overrides):
+    base = {
+        "last_seen": db.now_utc() - timedelta(minutes=10),
+        "max_frp": 150.0,
+        "hotspot_count": 4,
+        "source_count": 2,
+        "in_forest": 1,
+        "forest_distance_m": 0.0,
+    }
+    return {**base, **overrides}
+
+
+def test_score_feu_serieux_en_foret():
+    result = scoring.score_event(_event(), confidence="high")
+    # 30 fraîcheur + 25 FRP + 20 confiance + 25 forêt + 15 cluster + 10 multi-satellite = 125 -> plafonné
+    assert result["priority"] == "critical"
+    assert result["risk_score"] == 100.0
+    assert any("forestière" in reason for reason, _points in result["reasons"])
+
+
+def test_score_signal_faible_et_isole():
+    result = scoring.score_event(
+        _event(
+            last_seen=db.now_utc() - timedelta(hours=8),
+            max_frp=3.0,
+            hotspot_count=1,
+            source_count=1,
+            in_forest=0,
+            forest_distance_m=9000.0,
+        ),
+        confidence="low",
+    )
+    # ancien, faible, peu fiable, loin de toute forêt
+    assert result["priority"] == "low"
+    assert result["risk_score"] == 0.0
+
+
+def test_score_sans_couche_foret_ne_penalise_pas():
+    sans_foret = scoring.score_event(_event(in_forest=None, forest_distance_m=None), confidence="nominal")
+    hors_foret = scoring.score_event(_event(in_forest=0, forest_distance_m=9000.0), confidence="nominal")
+    assert sans_foret["risk_score"] > hors_foret["risk_score"]
+    assert not any("forêt" in reason for reason, _points in sans_foret["reasons"])
+
+
+def test_score_explicable():
+    result = scoring.score_event(_event(), confidence="high")
+    assert all(isinstance(reason, str) and isinstance(points, int) for reason, points in result["reasons"])
+    assert len(result["reasons"]) == 6, result["reasons"]
+
+
+def test_priorites_sur_la_fixture():
+    conn = db.connect(":memory:")
+    firms.ingest_fixture(conn, FIXTURE)
+    index = geo.GeoIndex(DATA_DIR)
+    if not index.has_departments:
+        print("  --  test_priorites_sur_la_fixture ignoré (lancez `pyrovigil fetch-data`)")
+        return
+    geo.enrich_hotspots(conn, index)
+    events.rebuild_events(conn)
+
+    maures = dict(conn.execute("SELECT * FROM fire_events WHERE department_code = '83'").fetchone())
+    landes = dict(conn.execute("SELECT * FROM fire_events WHERE department_code = '40'").fetchone())
+
+    # gros foyer récent, confirmé par deux satellites, contre un pixel isolé, ancien et peu fiable
+    assert maures["priority"] in ("high", "critical"), maures
+    assert maures["risk_score"] > landes["risk_score"]
+    assert landes["priority"] == "low", landes
+    assert json.loads(maures["score_detail"]), "la justification du score est stockée"
 
 
 def run_all():

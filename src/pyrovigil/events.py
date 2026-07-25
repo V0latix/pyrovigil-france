@@ -8,11 +8,13 @@ continue de brûler agrège les passages successifs.
 
 from __future__ import annotations
 
+import json
 import math
 import sqlite3
 from collections import Counter
 
 from .db import from_sql, to_sql
+from .scoring import score_event
 
 CLUSTER_DISTANCE_M = 1500
 CLUSTER_MINUTES = 90
@@ -195,7 +197,8 @@ def rebuild_events(conn: sqlite3.Connection, window_hours: int = DEFAULT_WINDOW_
             )
 
             # recalcul sur *tous* les hotspots de l'événement : ceux sortis de la fenêtre comptent encore
-            summary = _storable(summarize(load_event_hotspots(conn, event_id)))
+            summary = summarize(load_event_hotspots(conn, event_id))
+            assessment = score_event(summary, confidence=summary["confidence"])
             conn.execute(
                 """
                 UPDATE fire_events
@@ -205,10 +208,17 @@ def rebuild_events(conn: sqlite3.Connection, window_hours: int = DEFAULT_WINDOW_
                        max_frp = :max_frp, sum_frp = :sum_frp, max_brightness = :max_brightness,
                        in_france = :in_france, department_code = :department_code,
                        in_forest = :in_forest, forest_distance_m = :forest_distance_m,
+                       risk_score = :risk_score, priority = :priority, score_detail = :score_detail,
                        updated_at = datetime('now')
                  WHERE id = :id
                 """,
-                {**summary, "id": event_id},
+                {
+                    **_storable(summary),
+                    "id": event_id,
+                    "risk_score": assessment["risk_score"],
+                    "priority": assessment["priority"],
+                    "score_detail": json.dumps(assessment["reasons"], ensure_ascii=False),
+                },
             )
 
     return {"events": len(groups), "created": created, "updated": updated, "merged": merged}

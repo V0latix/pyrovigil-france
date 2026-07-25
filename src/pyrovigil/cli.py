@@ -66,6 +66,21 @@ def cmd_ingest(args: argparse.Namespace) -> int:
         f"({stats['created']} créés, {stats['updated']} mis à jour, {stats['merged']} fusionnés)"
     )
 
+    by_priority = conn.execute(
+        """
+        SELECT priority, count(*) AS n FROM fire_events
+         WHERE last_seen > datetime('now', '-24 hours')
+         GROUP BY priority
+        """
+    ).fetchall()
+    if by_priority:
+        order = {"critical": 0, "high": 1, "medium": 2, "low": 3}
+        summary = ", ".join(
+            f"{row['n']} {row['priority']}"
+            for row in sorted(by_priority, key=lambda r: order.get(r["priority"], 9))
+        )
+        print(f"Priorités sur 24 h : {summary}")
+
     total = conn.execute("SELECT count(*) FROM raw_hotspots").fetchone()[0]
     print(f"{total} hotspots en base")
     conn.close()
