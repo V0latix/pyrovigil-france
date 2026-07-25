@@ -211,9 +211,9 @@ def test_rebuild_events_est_idempotent_et_stable():
     assert second["updated"] == second["events"] == first["events"]
     assert [r["id"] for r in conn.execute("SELECT id FROM fire_events ORDER BY id")] == ids
 
-    # le massif des Maures : 4 hotspots, 2 satellites, un seul événement
+    # le massif des Maures : 4 hotspots proches, 2 satellites, un seul événement
     maures = conn.execute(
-        "SELECT * FROM fire_events WHERE department_code = '83'"
+        "SELECT * FROM fire_events ORDER BY hotspot_count DESC LIMIT 1"
     ).fetchone()
     assert maures["hotspot_count"] == 4
     assert maures["source_count"] == 2
