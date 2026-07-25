@@ -198,7 +198,8 @@ async function refresh() {
   try {
     const [eventsGeo, hotspotsGeo] = await Promise.all([
       fetch(`events.geojson?hours=${WINDOW_HOURS}`).then(r => r.json()),
-      fetch(`hotspots.geojson?hours=${WINDOW_HOURS}`).then(r => r.json())
+      // couche d'appoint, désactivée par défaut : son absence ne doit pas emporter la carte entière
+      fetch(`hotspots.geojson?hours=${WINDOW_HOURS}`).then(r => r.json()).catch(() => EMPTY)
     ]);
     allEvents = eventsGeo.features;
     allHotspots = hotspotsGeo.features;
