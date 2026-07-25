@@ -15,7 +15,7 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "src"))
 
-from pyrovigil import db, events, firms, geo, scoring  # noqa: E402
+from pyrovigil import alerts, db, events, firms, geo, scoring  # noqa: E402
 
 ROOT = Path(__file__).resolve().parents[1]
 FIXTURE = ROOT / "data" / "firms_sample.csv"
@@ -288,6 +288,72 @@ def test_priorites_sur_la_fixture():
     assert maures["risk_score"] > landes["risk_score"]
     assert landes["priority"] == "low", landes
     assert json.loads(maures["score_detail"]), "la justification du score est stockée"
+
+
+def _base_avec_evenement(priority="critical", risk_score=90.0, minutes_ago=5):
+    """Base en mémoire contenant un unique événement, sans passer par l'ingestion."""
+    conn = db.connect(":memory:")
+    conn.execute(
+        """
+        INSERT INTO fire_events (first_seen, last_seen, latitude, longitude, hotspot_count,
+                                 source_count, max_frp, in_forest, department_code, risk_score, priority)
+        VALUES (?, ?, 43.15, 6.35, 4, 2, 118.6, NULL, '83', ?, ?)
+        """,
+        (
+            db.to_sql(db.now_utc() - timedelta(minutes=minutes_ago + 40)),
+            db.to_sql(db.now_utc() - timedelta(minutes=minutes_ago)),
+            risk_score,
+            priority,
+        ),
+    )
+    conn.commit()
+    return conn
+
+
+def test_alerte_uniquement_les_priorites_hautes():
+    for priority, attendu in [("critical", 1), ("high", 1), ("medium", 0), ("low", 0)]:
+        conn = _base_avec_evenement(priority=priority)
+        assert len(alerts.pending_events(conn)) == attendu, priority
+
+
+def test_pas_d_alerte_sur_un_evenement_ancien():
+    conn = _base_avec_evenement(minutes_ago=180)
+    assert alerts.pending_events(conn) == [], "au-delà d'une heure, l'événement n'est plus une alerte"
+
+
+def test_anti_spam_une_seule_alerte():
+    conn = _base_avec_evenement()
+
+    assert len(alerts.send_alerts(conn)) == 1
+    assert alerts.send_alerts(conn) == [], "le cooldown de 2 h bloque la seconde alerte"
+    assert conn.execute("SELECT count(*) FROM alerts").fetchone()[0] == 1
+
+    # sans webhook, l'alerte est tracée comme journalisée plutôt qu'envoyée
+    assert conn.execute("SELECT delivery_status FROM alerts").fetchone()[0] == "logged"
+
+
+def test_realerte_si_le_score_progresse():
+    conn = _base_avec_evenement(risk_score=60.0)
+    assert len(alerts.send_alerts(conn)) == 1
+
+    conn.execute("UPDATE fire_events SET risk_score = 75")  # +15, sous le seuil
+    conn.commit()
+    assert alerts.send_alerts(conn) == []
+
+    conn.execute("UPDATE fire_events SET risk_score = 95")  # +35 depuis la dernière alerte
+    conn.commit()
+    assert len(alerts.send_alerts(conn)) == 1, "un feu qui grossit nettement justifie un second message"
+    assert conn.execute("SELECT count(*) FROM alerts").fetchone()[0] == 2
+
+
+def test_message_alerte_contient_l_essentiel():
+    conn = _base_avec_evenement()
+    message = alerts.format_message(alerts.pending_events(conn)[0])
+    assert "CRITICAL" in message
+    assert "43.15000, 6.35000" in message
+    assert "openstreetmap.org" in message
+    assert "ne remplace pas les secours" in message
+    assert "donnée absente" in message, "sans couche forêt, le message ne doit rien affirmer"
 
 
 def run_all():

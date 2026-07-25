@@ -8,12 +8,13 @@ laisser un terminal ouvert.
 from __future__ import annotations
 
 import argparse
+import logging
 import os
 import sys
 import time
 from pathlib import Path
 
-from . import db, events, firms, geo
+from . import alerts, db, events, firms, geo
 
 DATA_DIR = Path(os.environ.get("PYROVIGIL_DATA", "data"))
 FIXTURE = DATA_DIR / "firms_sample.csv"
@@ -81,6 +82,10 @@ def cmd_ingest(args: argparse.Namespace) -> int:
         )
         print(f"Priorités sur 24 h : {summary}")
 
+    if not args.no_alerts:
+        for alert in alerts.send_alerts(conn, os.environ.get("DISCORD_WEBHOOK_URL")):
+            print(f"Alerte {alert['status']} — événement {alert['event_id']} ({alert['priority']})")
+
     total = conn.execute("SELECT count(*) FROM raw_hotspots").fetchone()[0]
     print(f"{total} hotspots en base")
     conn.close()
@@ -98,6 +103,7 @@ def cmd_serve(args: argparse.Namespace) -> int:
 
 
 def main(argv: list[str] | None = None) -> int:
+    logging.basicConfig(level=logging.INFO, format="%(message)s")
     parser = argparse.ArgumentParser(prog="pyrovigil", description=__doc__)
     parser.add_argument("--database", default=None, help="chemin de la base SQLite")
     sub = parser.add_subparsers(dest="command", required=True)
@@ -110,6 +116,7 @@ def main(argv: list[str] | None = None) -> int:
     ingest.add_argument("--fixture-path", default=None)
     ingest.add_argument("--days", type=int, default=1, help="fenêtre FIRMS en jours (1 à 10)")
     ingest.add_argument("--loop", type=int, metavar="SECONDES", help="répète indéfiniment")
+    ingest.add_argument("--no-alerts", action="store_true", help="n'envoie aucune alerte")
     ingest.set_defaults(func=cmd_ingest)
 
     serve = sub.add_parser("serve", help="lance l'API et la carte")

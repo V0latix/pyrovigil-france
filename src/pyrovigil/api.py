@@ -14,7 +14,7 @@ from pathlib import Path
 from fastapi import Depends, FastAPI, Header, HTTPException, Query
 from fastapi.responses import FileResponse
 
-from . import db, events, firms, geo
+from . import alerts, db, events, firms, geo
 
 DATA_DIR = Path(os.environ.get("PYROVIGIL_DATA", "data"))
 STATIC_DIR = Path(__file__).parent / "static"
@@ -186,7 +186,15 @@ def admin_ingest(days: int = Query(1, ge=1, le=10), conn: sqlite3.Connection = D
     inserted = firms.ingest(conn, map_key, day_range=days)
     index = geo.GeoIndex(DATA_DIR)
     enriched = geo.enrich_hotspots(conn, index)
-    return {"inserted": inserted, "enriched": enriched, **events.rebuild_events(conn)}
+    stats = events.rebuild_events(conn)
+    sent = alerts.send_alerts(conn, os.environ.get("DISCORD_WEBHOOK_URL"))
+    return {"inserted": inserted, "enriched": enriched, **stats, "alerts": sent}
+
+
+@app.post("/admin/send-alerts", dependencies=[Depends(require_admin)])
+def admin_send_alerts(conn: sqlite3.Connection = Depends(get_db)):
+    """Rejoue la règle d'alerte immédiatement. L'anti-spam reste actif."""
+    return {"alerts": alerts.send_alerts(conn, os.environ.get("DISCORD_WEBHOOK_URL"))}
 
 
 @app.get("/", include_in_schema=False)
