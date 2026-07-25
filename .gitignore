@@ -8,3 +8,7 @@ uv.lock
 # Données téléchargées (voir `pyrovigil fetch-data`), sauf les fixtures de test
 data/*
 !data/firms_sample.csv
+
+.playwright-mcp/
+
+dist/

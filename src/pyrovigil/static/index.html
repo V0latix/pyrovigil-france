@@ -1,0 +1,326 @@
+<!doctype html>
+<html lang="fr">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>PyroVigil France</title>
+<link rel="stylesheet" href="https://unpkg.com/maplibre-gl@4.7.1/dist/maplibre-gl.css"
+      integrity="sha384-MinO0mNliZ3vwppuPOUnGa+iq619pfMhLVUXfC4LHwSCvF9H+6P/KO4Q7qBOYV5V"
+      crossorigin="anonymous">
+<style>
+  :root {
+    --bg: #14161a; --panel: #1c1f26; --line: #2b3039;
+    --text: #e6e8ec; --muted: #8b93a1;
+    --critical: #d00000; --high: #ff7b00; --medium: #ffd000; --low: #7d8592;
+  }
+  * { box-sizing: border-box; }
+  body {
+    margin: 0; height: 100vh; display: flex;
+    font: 14px/1.45 system-ui, -apple-system, "Segoe UI", sans-serif;
+    background: var(--bg); color: var(--text);
+  }
+  aside {
+    width: 350px; flex-shrink: 0; display: flex; flex-direction: column;
+    background: var(--panel); border-right: 1px solid var(--line);
+  }
+  header { padding: 16px 18px 12px; border-bottom: 1px solid var(--line); }
+  h1 { margin: 0; font-size: 17px; letter-spacing: -0.2px; }
+  h1 span { color: var(--high); }
+  .warning { margin: 6px 0 0; font-size: 11.5px; color: var(--muted); }
+  .controls { padding: 12px 18px; border-bottom: 1px solid var(--line); }
+  .row { display: flex; gap: 6px; align-items: center; }
+  .row + .row { margin-top: 10px; }
+  button.range {
+    flex: 1; padding: 6px 0; font: inherit; font-size: 12.5px; cursor: pointer;
+    background: transparent; color: var(--muted);
+    border: 1px solid var(--line); border-radius: 6px;
+  }
+  button.range:hover { color: var(--text); }
+  button.range[aria-pressed="true"] { background: #2d3340; color: var(--text); border-color: #3d4657; }
+  label.toggle { display: flex; gap: 7px; align-items: center; font-size: 12.5px; color: var(--muted); cursor: pointer; }
+  #list { flex: 1; overflow-y: auto; }
+  .event {
+    display: block; width: 100%; text-align: left; font: inherit; cursor: pointer;
+    padding: 11px 18px; background: none; color: inherit;
+    border: 0; border-bottom: 1px solid var(--line); border-left: 3px solid transparent;
+  }
+  .event:hover { background: #232833; }
+  .event .top { display: flex; justify-content: space-between; align-items: baseline; gap: 8px; }
+  .event .score { font-weight: 600; font-variant-numeric: tabular-nums; }
+  .event .where { color: var(--muted); font-size: 12.5px; }
+  .event .meta { margin-top: 3px; color: var(--muted); font-size: 12px; }
+  .badge {
+    display: inline-block; padding: 1px 7px; border-radius: 999px;
+    font-size: 10.5px; font-weight: 600; text-transform: uppercase; letter-spacing: 0.4px; color: #14161a;
+  }
+  /* la couleur de priorité ne teinte que le badge, jamais la ligne qui le contient */
+  .badge.critical { background: var(--critical); color: #fff; }
+  .badge.high { background: var(--high); }
+  .badge.medium { background: var(--medium); }
+  .badge.low { background: var(--low); color: #fff; }
+  .event.critical { border-left-color: var(--critical); }
+  .event.high { border-left-color: var(--high); }
+  .event.medium { border-left-color: var(--medium); }
+  .empty { padding: 24px 18px; color: var(--muted); }
+  footer { padding: 10px 18px; border-top: 1px solid var(--line); color: var(--muted); font-size: 11.5px; }
+  #map { flex: 1; }
+  .maplibregl-popup-content {
+    background: var(--panel); color: var(--text); border: 1px solid var(--line);
+    border-radius: 8px; padding: 12px 14px; font: inherit; font-size: 13px; min-width: 240px;
+  }
+  .maplibregl-popup-close-button { color: var(--muted); font-size: 18px; padding: 2px 7px; }
+  .maplibregl-popup-anchor-bottom .maplibregl-popup-tip { border-top-color: var(--line); }
+  .maplibregl-popup-anchor-top .maplibregl-popup-tip { border-bottom-color: var(--line); }
+  .popup h2 { margin: 0 0 8px; font-size: 14px; display: flex; gap: 8px; align-items: center; }
+  .popup dl { margin: 0 0 8px; display: grid; grid-template-columns: auto 1fr; gap: 2px 10px; }
+  .popup dt { color: var(--muted); }
+  .popup dd { margin: 0; font-variant-numeric: tabular-nums; }
+  .popup ul { margin: 8px 0 0; padding: 8px 0 0; list-style: none; border-top: 1px solid var(--line); }
+  .popup li { display: flex; justify-content: space-between; gap: 12px; color: var(--muted); font-size: 12px; }
+  .popup li b { font-variant-numeric: tabular-nums; color: var(--text); font-weight: 500; }
+</style>
+</head>
+<body>
+<aside>
+  <header>
+    <h1>Pyro<span>Vigil</span> France</h1>
+    <p class="warning">Signaux satellite, aide à la détection. Ne remplace pas les secours — en cas de feu, 18 ou 112.</p>
+  </header>
+  <div class="controls">
+    <div class="row" id="ranges">
+      <button class="range" data-hours="1">1 h</button>
+      <button class="range" data-hours="6">6 h</button>
+      <button class="range" data-hours="24" aria-pressed="true">24 h</button>
+      <button class="range" data-hours="168">7 j</button>
+    </div>
+    <div class="row">
+      <label class="toggle"><input type="checkbox" id="show-hotspots"> Points bruts</label>
+    </div>
+  </div>
+  <div id="list"></div>
+  <footer id="status">Chargement…</footer>
+</aside>
+<div id="map"></div>
+
+<script src="https://unpkg.com/maplibre-gl@4.7.1/dist/maplibre-gl.js"
+        integrity="sha384-SYKAG6cglRMN0RVvhNeBY0r3FYKNOJtznwA0v7B5Vp9tr31xAHsZC0DqkQ/pZDmj"
+        crossorigin="anonymous"></script>
+<script>
+const COLORS = { critical: '#d00000', high: '#ff7b00', medium: '#ffd000', low: '#7d8592' };
+const EMPTY = { type: 'FeatureCollection', features: [] };
+
+// Les deux fichiers sont chargés une fois sur toute la fenêtre disponible (7 jours) et filtrés dans le
+// navigateur. La page fonctionne donc à l'identique servie par l'API ou déposée en fichiers statiques —
+// un hébergeur statique ignore simplement la query string.
+const WINDOW_HOURS = 168;
+
+let hours = 24;
+let allEvents = [];
+let allHotspots = [];
+let events = [];
+
+const map = new maplibregl.Map({
+  container: 'map',
+  style: {
+    version: 8,
+    sources: {
+      osm: {
+        type: 'raster',
+        tiles: ['https://tile.openstreetmap.org/{z}/{x}/{y}.png'],
+        tileSize: 256,
+        attribution: '© OpenStreetMap · hotspots NASA FIRMS'
+      }
+    },
+    layers: [
+      { id: 'osm', type: 'raster', source: 'osm' },
+      // l'assombrissement garde les cercles de priorité lisibles sur un fond clair
+      { id: 'dim', type: 'background', paint: { 'background-color': '#0b0d10', 'background-opacity': 0.45 } }
+    ]
+  },
+  center: [2.5, 46.5],
+  zoom: 5,
+  maxBounds: [[-12, 38], [17, 55]]
+});
+map.addControl(new maplibregl.NavigationControl(), 'top-right');
+map.addControl(new maplibregl.ScaleControl(), 'bottom-right');
+
+map.on('load', () => {
+  map.addSource('events', { type: 'geojson', data: EMPTY });
+  map.addSource('hotspots', { type: 'geojson', data: EMPTY });
+
+  map.addLayer({
+    id: 'hotspots', type: 'circle', source: 'hotspots',
+    layout: { visibility: 'none' },
+    paint: {
+      'circle-radius': 3,
+      'circle-color': ['case', ['==', ['get', 'in_france'], 1], '#e6e8ec', '#5a6170'],
+      'circle-opacity': 0.85
+    }
+  });
+
+  // halo sous les événements prioritaires, pour les repérer au premier coup d'œil
+  map.addLayer({
+    id: 'events-halo', type: 'circle', source: 'events',
+    filter: ['in', ['get', 'priority'], ['literal', ['high', 'critical']]],
+    paint: {
+      'circle-radius': ['interpolate', ['linear'], ['get', 'risk_score'], 0, 12, 100, 34],
+      'circle-color': ['match', ['get', 'priority'], 'critical', COLORS.critical, COLORS.high],
+      'circle-opacity': 0.18,
+      'circle-blur': 0.5
+    }
+  });
+
+  map.addLayer({
+    id: 'events', type: 'circle', source: 'events',
+    paint: {
+      'circle-radius': ['interpolate', ['linear'], ['get', 'risk_score'], 0, 5, 100, 17],
+      'circle-color': [
+        'match', ['get', 'priority'],
+        'critical', COLORS.critical, 'high', COLORS.high, 'medium', COLORS.medium, COLORS.low
+      ],
+      'circle-opacity': 0.9,
+      'circle-stroke-width': 1.5,
+      'circle-stroke-color': '#14161a'
+    }
+  });
+
+  map.on('click', 'events', (e) => openPopup(e.features[0].properties));
+  for (const layer of ['events', 'hotspots']) {
+    map.on('mouseenter', layer, () => map.getCanvas().style.cursor = 'pointer');
+    map.on('mouseleave', layer, () => map.getCanvas().style.cursor = '');
+  }
+
+  refresh();
+  setInterval(refresh, 120000);
+});
+
+async function refresh() {
+  try {
+    const [eventsGeo, hotspotsGeo] = await Promise.all([
+      fetch(`events.geojson?hours=${WINDOW_HOURS}`).then(r => r.json()),
+      fetch(`hotspots.geojson?hours=${WINDOW_HOURS}`).then(r => r.json())
+    ]);
+    allEvents = eventsGeo.features;
+    allHotspots = hotspotsGeo.features;
+    render();
+  } catch (err) {
+    document.getElementById('status').textContent = `Erreur de chargement : ${err.message}`;
+  }
+}
+
+function render() {
+  const cutoff = Date.now() - hours * 3600000;
+  const eventFeatures = allEvents.filter(f => utc(f.properties.last_seen) >= cutoff);
+  const hotspotFeatures = allHotspots.filter(f => utc(f.properties.acquisition_time) >= cutoff);
+
+  map.getSource('events').setData({ type: 'FeatureCollection', features: eventFeatures });
+  map.getSource('hotspots').setData({ type: 'FeatureCollection', features: hotspotFeatures });
+  events = eventFeatures.map(f => f.properties);
+  renderList();
+
+  const latest = allEvents.length ? Math.max(...allEvents.map(f => utc(f.properties.last_seen))) : null;
+  document.getElementById('status').textContent =
+    `${events.length} événement(s), ${hotspotFeatures.length} point(s) bruts · ` +
+    (latest ? `détection la plus récente ${ago(new Date(latest).toISOString())}` : 'aucune donnée');
+}
+
+// les dates de l'API sont en UTC, sans suffixe de fuseau
+function utc(iso) {
+  return new Date(iso.replace(' ', 'T').replace(/Z?$/, 'Z')).getTime();
+}
+
+function ago(iso) {
+  const minutes = Math.max(0, (Date.now() - utc(iso)) / 60000);
+  if (minutes < 60) return `il y a ${Math.round(minutes)} min`;
+  if (minutes < 1440) return `il y a ${Math.round(minutes / 60)} h`;
+  return `il y a ${Math.round(minutes / 1440)} j`;
+}
+
+function forestLabel(properties) {
+  if (properties.in_forest === null || properties.in_forest === undefined) return null;
+  if (properties.in_forest) return 'en forêt';
+  const distance = properties.forest_distance_m;
+  return distance === null ? null : `à ${Math.round(distance)} m d'une forêt`;
+}
+
+function renderList() {
+  const list = document.getElementById('list');
+  if (!events.length) {
+    list.innerHTML = '<p class="empty">Aucun événement sur cette période.</p>';
+    return;
+  }
+  list.innerHTML = '';
+  for (const properties of events) {
+    const item = document.createElement('button');
+    item.className = `event ${properties.priority}`;
+    const details = [
+      `${properties.hotspot_count} point${properties.hotspot_count > 1 ? 's' : ''}`,
+      properties.source_count > 1 ? `${properties.source_count} satellites` : null,
+      properties.max_frp ? `${Math.round(properties.max_frp)} MW` : null,
+      forestLabel(properties)
+    ].filter(Boolean);
+    item.innerHTML = `
+      <span class="top">
+        <span><span class="badge ${properties.priority}">${properties.priority}</span>
+        <span class="where">${properties.department_code ? 'dépt ' + properties.department_code : 'France'}</span></span>
+        <span class="score">${Math.round(properties.risk_score)}</span>
+      </span>
+      <span class="meta">${ago(properties.last_seen)} · ${details.join(' · ')}</span>`;
+    item.onclick = () => {
+      const feature = events.find(e => e.id === properties.id);
+      map.flyTo({ center: coordsOf(properties.id), zoom: 11 });
+      openPopup(feature);
+    };
+    list.appendChild(item);
+  }
+}
+
+function coordsOf(id) {
+  return allEvents.find(f => f.properties.id === id).geometry.coordinates;
+}
+
+function openPopup(properties) {
+  // MapLibre sérialise les propriétés imbriquées en chaîne lors d'un clic sur la carte
+  const detail = typeof properties.score_detail === 'string'
+    ? JSON.parse(properties.score_detail) : (properties.score_detail || []);
+  const forest = forestLabel(properties);
+  const rows = [
+    ['Score', `${Math.round(properties.risk_score)} / 100`],
+    ['Dernière détection', ago(properties.last_seen)],
+    ['Première détection', ago(properties.first_seen)],
+    ['Pixels chauds', `${properties.hotspot_count} (${properties.source_count} satellite${properties.source_count > 1 ? 's' : ''})`],
+    ['FRP max', properties.max_frp ? `${Math.round(properties.max_frp)} MW` : '—'],
+    ['Département', properties.department_code || '—'],
+    ['Forêt', forest || 'donnée absente']
+  ];
+  const coordinates = coordsOf(properties.id);
+  new maplibregl.Popup({ offset: 14, maxWidth: '320px' })
+    .setLngLat(coordinates)
+    .setHTML(`
+      <div class="popup">
+        <h2><span class="badge ${properties.priority}">${properties.priority}</span> Événement ${properties.id}</h2>
+        <dl>${rows.map(([k, v]) => `<dt>${k}</dt><dd>${v}</dd>`).join('')}</dl>
+        <ul>${detail.map(([reason, points]) =>
+          `<li><span>${reason}</span><b>${points > 0 ? '+' : ''}${points}</b></li>`).join('')}</ul>
+        <p style="margin:8px 0 0"><a href="https://www.openstreetmap.org/?mlat=${coordinates[1]}&mlon=${coordinates[0]}#map=14/${coordinates[1]}/${coordinates[0]}"
+           target="_blank" rel="noopener" style="color:#8ab4f8">Voir la zone sur OpenStreetMap</a></p>
+      </div>`)
+    .addTo(map);
+}
+
+document.getElementById('ranges').onclick = (e) => {
+  const button = e.target.closest('button.range');
+  if (!button) return;
+  hours = Number(button.dataset.hours);
+  for (const other of document.querySelectorAll('button.range')) {
+    other.setAttribute('aria-pressed', String(other === button));
+  }
+  render();  // pas de nouvel appel réseau : les données sont déjà là
+};
+
+document.getElementById('show-hotspots').onchange = (e) => {
+  map.setLayoutProperty('hotspots', 'visibility', e.target.checked ? 'visible' : 'none');
+};
+</script>
+</body>
+</html>
