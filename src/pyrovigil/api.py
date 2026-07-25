@@ -12,10 +12,12 @@ import sqlite3
 from pathlib import Path
 
 from fastapi import Depends, FastAPI, Header, HTTPException, Query
+from fastapi.responses import FileResponse
 
 from . import db, events, firms, geo
 
 DATA_DIR = Path(os.environ.get("PYROVIGIL_DATA", "data"))
+STATIC_DIR = Path(__file__).parent / "static"
 
 PRIORITY_ORDER = {"low": 0, "medium": 1, "high": 2, "critical": 3}
 
@@ -185,6 +187,11 @@ def admin_ingest(days: int = Query(1, ge=1, le=10), conn: sqlite3.Connection = D
     index = geo.GeoIndex(DATA_DIR)
     enriched = geo.enrich_hotspots(conn, index)
     return {"inserted": inserted, "enriched": enriched, **events.rebuild_events(conn)}
+
+
+@app.get("/", include_in_schema=False)
+def carte():
+    return FileResponse(STATIC_DIR / "index.html")
 
 
 @app.post("/admin/recompute-events", dependencies=[Depends(require_admin)])

@@ -99,8 +99,13 @@ CREATE INDEX IF NOT EXISTS alerts_event_idx ON alerts (event_id, sent_at DESC);
 
 
 def connect(path: str | Path | None = None) -> sqlite3.Connection:
-    """Ouvre la base et applique le schéma (idempotent)."""
-    conn = sqlite3.connect(str(path or DEFAULT_DB_PATH))
+    """Ouvre la base et applique le schéma (idempotent).
+
+    `check_same_thread=False` : FastAPI exécute les dépendances et les endpoints synchrones dans des
+    threads différents de son pool. Chaque requête reçoit sa propre connexion, fermée à la fin, donc
+    aucune connexion n'est partagée entre deux threads simultanément.
+    """
+    conn = sqlite3.connect(str(path or DEFAULT_DB_PATH), check_same_thread=False)
     conn.row_factory = sqlite3.Row
     conn.execute("PRAGMA foreign_keys = ON")
     conn.executescript(SCHEMA)
