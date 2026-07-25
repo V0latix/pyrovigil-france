@@ -13,7 +13,7 @@ import sys
 import time
 from pathlib import Path
 
-from . import db, firms, geo
+from . import db, events, firms, geo
 
 DATA_DIR = Path(os.environ.get("PYROVIGIL_DATA", "data"))
 FIXTURE = DATA_DIR / "firms_sample.csv"
@@ -59,6 +59,12 @@ def cmd_ingest(args: argparse.Namespace) -> int:
         print(f"{enriched} hotspots localisés, {in_france} en France")
     else:
         print("Masque France absent : lancez `pyrovigil fetch-data`", file=sys.stderr)
+
+    stats = events.rebuild_events(conn)
+    print(
+        f"{stats['events']} événements dans la fenêtre "
+        f"({stats['created']} créés, {stats['updated']} mis à jour, {stats['merged']} fusionnés)"
+    )
 
     total = conn.execute("SELECT count(*) FROM raw_hotspots").fetchone()[0]
     print(f"{total} hotspots en base")

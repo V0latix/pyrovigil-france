@@ -10,12 +10,12 @@ from __future__ import annotations
 import json
 import sys
 import tempfile
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "src"))
 
-from pyrovigil import db, firms, geo  # noqa: E402
+from pyrovigil import db, events, firms, geo  # noqa: E402
 
 ROOT = Path(__file__).resolve().parents[1]
 FIXTURE = ROOT / "data" / "firms_sample.csv"
@@ -125,6 +125,99 @@ def test_sans_couche_foret():
         index = geo.GeoIndex(Path(tmp))
         assert index.forest(43.15, 6.35) == (None, None)
         assert index.locate(43.15, 6.35)["in_forest"] is None
+
+
+def _hotspot(lat, lon, minutes_ago=0, satellite="N", frp=50.0, confidence="high", **extra):
+    """Hotspot minimal pour les tests de clustering et de scoring."""
+    return {
+        "id": extra.pop("id", None),
+        "latitude": lat,
+        "longitude": lon,
+        "time": db.now_utc().replace(microsecond=0) - timedelta(minutes=minutes_ago),
+        "satellite": satellite,
+        "confidence": confidence,
+        "frp": frp,
+        "brightness": None,
+        "bright_ti4": 350.0,
+        "in_france": 1,
+        "department_code": "83",
+        "in_forest": extra.pop("in_forest", None),
+        "forest_distance_m": extra.pop("forest_distance_m", None),
+        **extra,
+    }
+
+
+def test_haversine():
+    # 1 degré de latitude ≈ 111 km
+    assert 110_000 < events.haversine_m(43.0, 6.0, 44.0, 6.0) < 112_000
+    assert events.haversine_m(43.0, 6.0, 43.0, 6.0) == 0.0
+
+
+def test_cluster_regroupe_les_hotspots_proches():
+    # 3 pixels dans un rayon de ~500 m, sur 30 minutes -> un seul feu
+    group = [
+        _hotspot(43.1521, 6.3487, minutes_ago=30),
+        _hotspot(43.1563, 6.3512, minutes_ago=30),
+        _hotspot(43.1498, 6.3441, minutes_ago=0),
+    ]
+    assert len(events.cluster(group)) == 1
+
+    # le même trio plus un point à 50 km -> deux feux distincts
+    clusters = events.cluster(group + [_hotspot(43.6, 6.3, minutes_ago=10)])
+    assert sorted(len(c) for c in clusters) == [1, 3]
+
+
+def test_cluster_separe_dans_le_temps():
+    # même position, mais 160 minutes d'écart (> 90) : deux événements
+    same_place = [_hotspot(43.15, 6.35, minutes_ago=0), _hotspot(43.15, 6.35, minutes_ago=160)]
+    assert len(events.cluster(same_place)) == 2
+
+    # un passage intermédiaire fait le pont : la relation est transitive, le feu qui dure reste un seul
+    # événement même si ses extrémités sont éloignées dans le temps
+    bridged = same_place + [_hotspot(43.15, 6.35, minutes_ago=80)]
+    assert len(events.cluster(bridged)) == 1
+
+
+def test_summarize_agrege_le_groupe():
+    summary = events.summarize(
+        [
+            _hotspot(43.10, 6.30, minutes_ago=60, satellite="N", frp=20.0, confidence="nominal"),
+            _hotspot(43.20, 6.40, minutes_ago=10, satellite="N20", frp=100.0, confidence="high"),
+        ]
+    )
+    assert summary["hotspot_count"] == 2
+    assert summary["source_count"] == 2, "deux satellites distincts"
+    assert summary["max_frp"] == 100.0
+    assert summary["sum_frp"] == 120.0
+    assert summary["confidence"] == "high"
+    assert abs(summary["latitude"] - 43.15) < 1e-9
+    assert db.from_sql(summary["last_seen"]) > db.from_sql(summary["first_seen"])
+
+
+def test_rebuild_events_est_idempotent_et_stable():
+    conn = db.connect(":memory:")
+    firms.ingest_fixture(conn, FIXTURE)
+    index = geo.GeoIndex(DATA_DIR)
+    if index.has_departments:
+        geo.enrich_hotspots(conn, index)
+
+    first = events.rebuild_events(conn)
+    assert first["created"] == first["events"] > 0
+    ids = [r["id"] for r in conn.execute("SELECT id FROM fire_events ORDER BY id")]
+
+    # relancer ne crée rien et conserve les identifiants (les alertes en dépendent)
+    second = events.rebuild_events(conn)
+    assert second["created"] == 0
+    assert second["updated"] == second["events"] == first["events"]
+    assert [r["id"] for r in conn.execute("SELECT id FROM fire_events ORDER BY id")] == ids
+
+    # le massif des Maures : 4 hotspots, 2 satellites, un seul événement
+    maures = conn.execute(
+        "SELECT * FROM fire_events WHERE department_code = '83'"
+    ).fetchone()
+    assert maures["hotspot_count"] == 4
+    assert maures["source_count"] == 2
+    assert maures["max_frp"] == 118.6
 
 
 def run_all():
