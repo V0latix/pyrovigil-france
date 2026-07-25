@@ -87,6 +87,16 @@ def cmd_ingest(args: argparse.Namespace) -> int:
     return 0
 
 
+def cmd_serve(args: argparse.Namespace) -> int:
+    import uvicorn
+
+    if args.database:
+        os.environ["PYROVIGIL_DB"] = args.database
+    print(f"Carte et API sur http://{args.host}:{args.port}/")
+    uvicorn.run("pyrovigil.api:app", host=args.host, port=args.port, reload=args.reload)
+    return 0
+
+
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(prog="pyrovigil", description=__doc__)
     parser.add_argument("--database", default=None, help="chemin de la base SQLite")
@@ -101,6 +111,12 @@ def main(argv: list[str] | None = None) -> int:
     ingest.add_argument("--days", type=int, default=1, help="fenêtre FIRMS en jours (1 à 10)")
     ingest.add_argument("--loop", type=int, metavar="SECONDES", help="répète indéfiniment")
     ingest.set_defaults(func=cmd_ingest)
+
+    serve = sub.add_parser("serve", help="lance l'API et la carte")
+    serve.add_argument("--host", default="127.0.0.1")
+    serve.add_argument("--port", type=int, default=8000)
+    serve.add_argument("--reload", action="store_true")
+    serve.set_defaults(func=cmd_serve)
 
     args = parser.parse_args(argv)
 
