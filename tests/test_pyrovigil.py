@@ -16,7 +16,7 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "src"))
 
-from pyrovigil import alerts, db, events, firms, geo, scoring  # noqa: E402
+from pyrovigil import alerts, db, events, firms, geo, lsasaf, scoring  # noqa: E402
 
 ROOT = Path(__file__).resolve().parents[1]
 FIXTURE = ROOT / "data" / "firms_sample.csv"
@@ -456,6 +456,157 @@ def test_message_alerte_contient_l_essentiel():
     assert "openstreetmap.org" in message
     assert "ne remplace pas les secours" in message
     assert "donnée absente" in message, "sans couche forêt, le message ne doit rien affirmer"
+
+
+# --- MTG FRP-PIXEL (LSA SAF) ------------------------------------------------------------------
+#
+# ponytail: en-tête reconstitué depuis la documentation LSA SAF, faute d'identifiants pour tirer un
+# vrai fichier. Les tests portent sur la logique — créneaux, emprise, déduplication, contrôle
+# d'en-tête — qui ne dépend pas des noms exacts. Si le premier passage réel révèle d'autres noms,
+# ils changent ici et dans `lsasaf.REQUIRED_COLUMNS`, pas dans le reste du module.
+MTG_LISTE = """LATITUDE,LONGITUDE,FRP,FRP_UNCERTAINTY
+43.1521,6.3487,118.6,12.4
+43.1602,6.3550,41.2,8.1
+-12.4400,28.7100,315.0,30.0
+"""
+
+
+def test_lsasaf_creneaux_deterministes():
+    creneaux = lsasaf.slots(datetime(2026, 7, 26, 14, 37, 42, tzinfo=timezone.utc), count=3)
+    assert creneaux[0] == datetime(2026, 7, 26, 14, 30, tzinfo=timezone.utc), "plancher à 10 min"
+    assert creneaux[-1] == datetime(2026, 7, 26, 14, 10, tzinfo=timezone.utc), "du plus récent au plus ancien"
+    assert lsasaf.url_for(creneaux[0]).endswith("/2026/07/26/LSA-509_MTG_MTFRPPIXEL-ListProduct_MTG-FD_202607261430.csv.gz")
+
+
+def test_lsasaf_parse_liste():
+    creneau = datetime(2026, 7, 26, 14, 30, tzinfo=timezone.utc)
+    rows = lsasaf.parse_list(MTG_LISTE, creneau)
+
+    # le point zambien du plein disque est hors emprise France
+    assert len(rows) == 2, rows
+    assert rows[0]["source"] == "MTG"
+    assert rows[0]["satellite"] == "MTG-I1"
+    assert rows[0]["frp"] == 118.6
+    assert rows[0]["acquisition_time"] == creneau, "l'horodatage vient du créneau, pas d'une colonne"
+    assert rows[0]["confidence"] == "unknown", "le produit ne fournit pas de classe de confiance"
+    assert rows[0]["brightness"] is None and rows[0]["bright_ti4"] is None
+
+
+def test_lsasaf_en_tete_inattendu_leve():
+    """Le jour où le produit change de colonnes, il faut le savoir, pas insérer du vide."""
+    try:
+        lsasaf.parse_list("lat,lon,power\n43.1,6.3,10\n", db.now_utc())
+        raise AssertionError("un en-tête inattendu doit lever")
+    except lsasaf.LsaSafError as exc:
+        assert "LATITUDE" in str(exc) and "LAT, LON, POWER" in str(exc), str(exc)
+
+
+def test_lsasaf_deduplique():
+    conn = db.connect(":memory:")
+    creneau = datetime(2026, 7, 26, 14, 30, tzinfo=timezone.utc)
+    rows = lsasaf.parse_list(MTG_LISTE, creneau)
+
+    assert firms.insert_hotspots(conn, rows) == 2
+    assert firms.insert_hotspots(conn, rows) == 0, "rejouer un créneau ne doit rien ajouter"
+
+
+def test_lsasaf_creneau_absent_ou_en_panne_ne_leve_pas():
+    """Produit en démonstration : un trou est normal, le prochain passage est dans 10 min."""
+    conn = db.connect(":memory:")
+    creneau = datetime(2026, 7, 26, 14, 30, tzinfo=timezone.utc)
+    appels = []
+
+    def fetch_capricieux(slot, user, password, **kwargs):
+        appels.append(slot)
+        if slot == creneau:
+            return MTG_LISTE
+        if slot.minute == 20:
+            raise lsasaf.LsaSafError("simulation d'indisponibilité")
+        return None  # pas encore publié
+
+    original = lsasaf.fetch_slot
+    lsasaf.fetch_slot = fetch_capricieux
+    try:
+        assert lsasaf.ingest(conn, "u", "p", count=3, now=creneau) == 2
+        assert len(appels) == 3, "tous les créneaux sont tentés"
+
+        # même quand tout échoue : on journalise, on n'échoue pas
+        lsasaf.fetch_slot = lambda *a, **k: (_ for _ in ()).throw(lsasaf.LsaSafError("tout est tombé"))
+        assert lsasaf.ingest(db.connect(":memory:"), "u", "p", count=3, now=creneau) == 0
+    finally:
+        lsasaf.fetch_slot = original
+
+
+def test_lsasaf_identifiants_absents_sont_une_erreur_de_configuration():
+    """Une clé oubliée ne doit pas ressembler à « aucun feu détecté »."""
+    try:
+        lsasaf.ingest(db.connect(":memory:"), "", "")
+        raise AssertionError("des identifiants absents doivent lever")
+    except lsasaf.LsaSafAuthError as exc:
+        assert "mokey.lsasvcs.ipma.pt" in str(exc), "le message doit dire où s'inscrire"
+
+
+def test_score_pixel_geostationnaire_repete_n_est_pas_un_groupe():
+    """Six observations du même pixel à 10 min d'intervalle ne sont pas six foyers."""
+    repete = [_hotspot(43.1521, 6.3487, minutes_ago=10 * i, satellite="MTG-I1") for i in range(6)]
+    assert events.summarize(repete)["pixel_count"] == 1
+    assert events.summarize(repete)["hotspot_count"] == 6, "le comptage brut reste disponible"
+
+    groupes = [_hotspot(43.1521, 6.3487), _hotspot(43.1560, 6.3550)]
+    assert events.summarize(groupes)["pixel_count"] == 2
+
+    raisons = dict(scoring.score_event(events.summarize(repete), confidence="high")["reasons"])
+    assert not any("pixels chauds groupés" in r for r in raisons), raisons
+    raisons = dict(scoring.score_event(events.summarize(groupes), confidence="high")["reasons"])
+    assert any("pixels chauds groupés" in r for r in raisons), raisons
+
+
+def test_cli_une_source_en_panne_ne_tue_pas_l_autre():
+    """Avec deux sources, une panne FIRMS ne doit plus emporter l'exécution entière."""
+    import argparse
+    import os
+
+    from pyrovigil import cli
+
+    conn = db.connect(":memory:")
+    args = argparse.Namespace(source="all", days=1)
+    creneau = datetime(2026, 7, 26, 14, 30, tzinfo=timezone.utc)
+
+    originaux = (firms.ingest, lsasaf.ingest, os.environ.get("FIRMS_MAP_KEY"))
+    firms.ingest = lambda *a, **k: (_ for _ in ()).throw(firms.FirmsError("tout est tombé"))
+    lsasaf.ingest = lambda c, *a, **k: firms.insert_hotspots(c, lsasaf.parse_list(MTG_LISTE, creneau))
+    os.environ["FIRMS_MAP_KEY"] = "cle-factice"
+    try:
+        assert cli._ingest_sources(conn, args) == 2, "MTG doit passer malgré la panne FIRMS"
+
+        # les deux muettes en revanche : le job doit échouer, pas annoncer « aucun feu »
+        lsasaf.ingest = lambda *a, **k: (_ for _ in ()).throw(lsasaf.LsaSafAuthError("pas d'identifiants"))
+        assert cli._ingest_sources(db.connect(":memory:"), args) is None
+    finally:
+        firms.ingest, lsasaf.ingest, cle = originaux
+        os.environ["FIRMS_MAP_KEY"] = cle or ""
+
+
+def test_purge_conserve_evenements_et_alertes():
+    from pyrovigil import cli
+
+    conn = _base_avec_evenement()
+    vieux = db.to_sql(db.now_utc() - timedelta(days=cli.PURGE_DAYS + 1))
+    for acquisition in (vieux, db.to_sql(db.now_utc())):
+        conn.execute(
+            "INSERT INTO raw_hotspots (source, satellite, acquisition_time, latitude, longitude, raw)"
+            " VALUES ('MTG', 'MTG-I1', ?, 43.15, 6.35, '{}')",
+            (acquisition,),
+        )
+    conn.execute("INSERT INTO event_hotspots (event_id, hotspot_id) SELECT 1, id FROM raw_hotspots")
+    conn.commit()
+    alerts.send_alerts(conn)
+
+    assert cli._purge(conn) == 1
+    assert conn.execute("SELECT count(*) FROM raw_hotspots").fetchone()[0] == 1, "seul l'ancien part"
+    assert conn.execute("SELECT count(*) FROM event_hotspots").fetchone()[0] == 1, "cascade"
+    assert conn.execute("SELECT count(*) FROM fire_events").fetchone()[0] == 1, "l'événement survit"
+    assert conn.execute("SELECT count(*) FROM alerts").fetchone()[0] == 1, "l'alerte survit"
 
 
 def run_all():

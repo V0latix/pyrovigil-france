@@ -84,6 +84,10 @@ def summarize(group: list[dict]) -> dict:
         "latitude": sum(h["latitude"] for h in group) / len(group),
         "longitude": sum(h["longitude"] for h in group) / len(group),
         "hotspot_count": len(group),
+        # Positions distinctes, à distinguer du nombre de lignes : un pixel géostationnaire est
+        # réobservé toutes les 10 min au même endroit. Six lignes ne sont pas six foyers, et le
+        # barème crédite le regroupement *spatial*. Voir scoring._cluster.
+        "pixel_count": len({(round(h["latitude"], 4), round(h["longitude"], 4)) for h in group}),
         "source_count": len({h["satellite"] for h in group}),
         "max_frp": max(frps) if frps else None,
         "sum_frp": sum(frps) if frps else None,
@@ -225,5 +229,5 @@ def rebuild_events(conn: sqlite3.Connection, window_hours: int = DEFAULT_WINDOW_
 
 
 def _storable(summary: dict) -> dict:
-    """La confiance sert au scoring mais n'est pas une colonne de fire_events."""
-    return {key: value for key, value in summary.items() if key != "confidence"}
+    """Confiance et nombre de positions servent au scoring, mais ne sont pas des colonnes."""
+    return {key: value for key, value in summary.items() if key not in ("confidence", "pixel_count")}

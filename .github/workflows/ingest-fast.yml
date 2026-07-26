@@ -1,0 +1,68 @@
+name: Ingestion MTG (rapprochée)
+
+# Le produit MTG FRP-PIXEL est publié toutes les 10 minutes avec 20 à 45 min de latence : le
+# poller à cette cadence a un sens, contrairement à FIRMS que le workflow horaire suffit à couvrir.
+# Ce job ne fait ni export ni déploiement — c'est ce qui rend la cadence tenable : le plan Vercel
+# Hobby plafonne à 100 déploiements par jour, et il y a 144 créneaux de 10 minutes.
+on:
+  schedule:
+    - cron: "*/10 * * * *"
+  workflow_dispatch:
+
+# Même groupe que le workflow horaire : les deux écrivent la même base, ils doivent se sérialiser.
+# GitHub ne garde qu'une seule exécution en attente par groupe, donc une exécution rapprochée peut
+# être écartée pendant que l'horaire tourne. Sans gravité : la suivante arrive dans 10 minutes et
+# `lsasaf.ingest` reprend la dernière heure de créneaux.
+concurrency:
+  group: ingest
+  cancel-in-progress: false
+
+permissions:
+  contents: write
+
+env:
+  DB_RELEASE: data
+
+jobs:
+  ingest-mtg:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: astral-sh/setup-uv@v5
+        with:
+          enable-cache: true
+
+      - name: Couches géographiques (cache)
+        uses: actions/cache@v4
+        with:
+          path: data/departements.geojson
+          key: departements-v1
+
+      - name: Télécharge les départements si absents du cache
+        run: test -f data/departements.geojson || uv run pyrovigil fetch-data
+
+      - name: Récupère la base de l'exécution précédente
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          if gh release download "$DB_RELEASE" --pattern pyrovigil.db --clobber 2>/dev/null; then
+            echo "Base récupérée : $(du -h pyrovigil.db | cut -f1)"
+          else
+            echo "Aucune base précédente, démarrage à vide"
+          fi
+
+      # --source mtg : inutile de solliciter FIRMS six fois par heure pour une donnée dont la
+      # latence se compte en heures. L'alerte Discord part d'ici, c'est tout l'intérêt du job.
+      - name: Ingestion MTG, clustering, scoring, alertes
+        env:
+          LSASAF_USER: ${{ secrets.LSASAF_USER }}
+          LSASAF_PASSWORD: ${{ secrets.LSASAF_PASSWORD }}
+          DISCORD_WEBHOOK_URL: ${{ secrets.DISCORD_WEBHOOK_URL }}
+        run: uv run pyrovigil ingest --source mtg
+
+      - name: Sauvegarde la base
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: gh release upload "$DB_RELEASE" pyrovigil.db --clobber

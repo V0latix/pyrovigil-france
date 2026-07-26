@@ -14,10 +14,84 @@ import sys
 import time
 from pathlib import Path
 
-from . import alerts, db, events, firms, geo
+from . import alerts, db, events, firms, geo, lsasaf
 
 DATA_DIR = Path(os.environ.get("PYROVIGIL_DATA", "data"))
 FIXTURE = DATA_DIR / "firms_sample.csv"
+
+# Au-delà, les pixels bruts ne servent plus qu'à faire grossir un fichier qui fait l'aller-retour
+# vers la Release GitHub à chaque exécution. Les événements et les alertes, eux, restent.
+PURGE_DAYS = 30
+
+AIDE_FIRMS = (
+    "FIRMS_MAP_KEY manquante. Clé gratuite et immédiate sur\n"
+    "  https://firms.modaps.eosdis.nasa.gov/api/map_key\n"
+    "En attendant : `pyrovigil ingest --fixture` travaille sur un jeu de données local."
+)
+
+
+def _ingest_sources(conn, args) -> int | None:
+    """Ingère les sources demandées. Renvoie None si aucune n'a pu tourner.
+
+    Une source explicitement demandée et non configurée est une erreur ; une source seulement
+    incluse par `--source all` est ignorée avec un avertissement. Sans cela, ajouter MTG
+    casserait toutes les installations qui n'ont qu'une clé FIRMS.
+    """
+    total, ingerees = 0, []
+
+    if args.source in ("all", "firms"):
+        map_key = os.environ.get("FIRMS_MAP_KEY")
+        if map_key:
+            try:
+                total += firms.ingest(conn, map_key, day_range=args.days)
+                ingerees.append(f"FIRMS {args.days} j")
+            except firms.FirmsError as exc:
+                # Avec une seconde source, une panne FIRMS ne doit plus emporter l'exécution
+                # entière : la carte a encore quelque chose à publier. Si MTG est muet aussi,
+                # le garde-fou `if not ingerees` plus bas fait échouer le job bruyamment.
+                if args.source == "firms":
+                    raise
+                print(f"FIRMS injoignable, source ignorée : {exc}", file=sys.stderr)
+        elif args.source == "firms":
+            print(AIDE_FIRMS, file=sys.stderr)
+            return None
+        else:
+            print("FIRMS_MAP_KEY absente : source ignorée.", file=sys.stderr)
+
+    if args.source in ("all", "mtg"):
+        try:
+            total += lsasaf.ingest(
+                conn, os.environ.get("LSASAF_USER", ""), os.environ.get("LSASAF_PASSWORD", "")
+            )
+            ingerees.append("MTG 1 h")
+        except lsasaf.LsaSafAuthError as exc:
+            if args.source == "mtg":
+                print(exc, file=sys.stderr)
+                return None
+            print("Identifiants LSA SAF absents : source MTG ignorée.", file=sys.stderr)
+
+    if not ingerees:
+        print("Aucune source configurée, rien à ingérer.", file=sys.stderr)
+        return None
+
+    print(f"{total} nouveaux hotspots ({', '.join(ingerees)})")
+    return total
+
+
+def _purge(conn) -> int:
+    """Supprime les hotspots bruts trop anciens. `event_hotspots` tombe en cascade.
+
+    ponytail: VACUUM à chaque purge effective — sans lui SQLite réutilise les pages libérées
+    mais ne rend jamais les octets, et c'est la taille du fichier qui compte ici.
+    """
+    with conn:
+        supprimes = conn.execute(
+            "DELETE FROM raw_hotspots WHERE acquisition_time < datetime('now', ?)",
+            (f"-{PURGE_DAYS} days",),
+        ).rowcount
+    if supprimes > 0:
+        conn.execute("VACUUM")
+    return supprimes
 
 
 def cmd_fetch_data(args: argparse.Namespace) -> int:
@@ -34,18 +108,12 @@ def cmd_ingest(args: argparse.Namespace) -> int:
     if args.fixture:
         inserted = firms.ingest_fixture(conn, Path(args.fixture_path or FIXTURE))
         print(f"{inserted} nouveaux hotspots (fixture {args.fixture_path or FIXTURE})")
-    else:
-        map_key = os.environ.get("FIRMS_MAP_KEY")
-        if not map_key:
-            print(
-                "FIRMS_MAP_KEY manquante. Clé gratuite et immédiate sur\n"
-                "  https://firms.modaps.eosdis.nasa.gov/api/map_key\n"
-                "En attendant : `pyrovigil ingest --fixture` travaille sur un jeu de données local.",
-                file=sys.stderr,
-            )
-            return 1
-        inserted = firms.ingest(conn, map_key, day_range=args.days)
-        print(f"{inserted} nouveaux hotspots (FIRMS, {args.days} j)")
+    elif _ingest_sources(conn, args) is None:
+        return 1
+
+    purges = _purge(conn)
+    if purges:
+        print(f"{purges} hotspots de plus de {PURGE_DAYS} jours purgés")
 
     index = geo.GeoIndex(DATA_DIR, online=True)
     if index.has_departments:
@@ -140,6 +208,12 @@ def main(argv: list[str] | None = None) -> int:
     fetch.set_defaults(func=cmd_fetch_data)
 
     ingest = sub.add_parser("ingest", help="récupère les hotspots et met à jour les événements")
+    ingest.add_argument(
+        "--source",
+        choices=("all", "firms", "mtg"),
+        default="all",
+        help="sources à interroger (défaut : all). `mtg` seul pour une boucle rapprochée",
+    )
     ingest.add_argument("--fixture", action="store_true", help="utilise un CSV local au lieu de l'API")
     ingest.add_argument("--fixture-path", default=None)
     ingest.add_argument("--days", type=int, default=1, help="fenêtre FIRMS en jours (1 à 10)")

@@ -1,15 +1,17 @@
 # PyroVigil France
 
 Prototype open-source d'aide à la détection rapide de signaux de feux de forêt en France à partir de données
-satellite ouvertes. Il ingère les anomalies thermiques NASA FIRMS, les filtre avec des données géographiques
-françaises, les regroupe en événements scorés, les affiche sur une carte et alerte sur les signaux forts.
+satellite ouvertes. Il ingère les anomalies thermiques NASA FIRMS et MTG, les filtre avec des données
+géographiques françaises, les regroupe en événements scorés, les affiche sur une carte et alerte sur les
+signaux forts.
 
 > **Ce n'est pas un système d'alerte officiel.** Il ne remplace ni les pompiers, ni le SDIS, ni la préfecture,
 > et ne confirme pas juridiquement un incendie. En cas de feu, appelez le **18** ou le **112**.
 
 ```
-FIRMS ──▶ raw_hotspots ──▶ filtre France / forêt ──▶ clustering ──▶ score ──┬──▶ API + carte
-                                                                            └──▶ alerte Discord
+FIRMS  (polaire, 375 m, ~4 h)  ─┐
+                                ├─▶ raw_hotspots ──▶ filtre France / forêt ──▶ clustering ──▶ score ──┬──▶ API + carte
+MTG    (géostat., 1 km, ~30 min) ┘                                                                     └──▶ alerte Discord
 ```
 
 ## Démarrage
@@ -32,10 +34,16 @@ export $(grep -v '^#' .env | xargs)
 uv run pyrovigil ingest   # données réelles des dernières 24 h
 ```
 
+Ajouter [des identifiants LSA SAF](https://mokey.lsasvcs.ipma.pt/auth/signup) (gratuits aussi) dans le même
+`.env` active la source MTG et fait tomber la latence de 4-5 h à une trentaine de minutes — voir
+[§ La source MTG](#la-source-mtg). Sans eux, `ingest` se rabat sur FIRMS seul et le dit.
+
 Pour une surveillance continue, une ligne de cron suffit — la commande est idempotente :
 
 ```cron
-*/10 * * * * cd /chemin/vers/pyrovigil && FIRMS_MAP_KEY=… .venv/bin/pyrovigil ingest >> pyrovigil.log 2>&1
+# MTG toutes les 10 min (sa cadence de publication), FIRMS une fois par heure (sa latence réelle)
+*/10 * * * * cd /chemin/vers/pyrovigil && set -a && . ./.env && .venv/bin/pyrovigil ingest --source mtg >> pyrovigil.log 2>&1
+17  *  * * * cd /chemin/vers/pyrovigil && set -a && . ./.env && .venv/bin/pyrovigil ingest >> pyrovigil.log 2>&1
 ```
 
 ## Commandes
@@ -43,7 +51,8 @@ Pour une surveillance continue, une ligne de cron suffit — la commande est ide
 | Commande | Rôle |
 |---|---|
 | `pyrovigil fetch-data` | télécharge les contours des départements |
-| `pyrovigil ingest` | récupère FIRMS, localise, clusterise, score, alerte |
+| `pyrovigil ingest` | récupère toutes les sources, localise, clusterise, score, alerte |
+| `pyrovigil ingest --source mtg` | MTG seul — pour une boucle à 10 minutes |
 | `pyrovigil ingest --fixture` | idem sur le CSV local, sans clé API |
 | `pyrovigil ingest --loop 600` | répète toutes les 10 minutes |
 | `pyrovigil ingest --no-alerts` | ingère sans rien envoyer |
@@ -69,16 +78,24 @@ restent **désactivées** tant que `PYROVIGIL_ADMIN_TOKEN` n'est pas défini. Do
 
 ## Déploiement gratuit
 
-Le dépôt s'héberge tout seul, sans serveur ni base managée. Le workflow
-[`.github/workflows/ingest.yml`](.github/workflows/ingest.yml) tourne toutes les heures :
+Le dépôt s'héberge tout seul, sans serveur ni base managée. Deux workflows se partagent le travail :
+
+[`ingest.yml`](.github/workflows/ingest.yml), **toutes les heures** — le pipeline complet :
 
 ```
 récupère pyrovigil.db depuis la Release « data »
-  └─ pyrovigil ingest        (FIRMS → localisation → clustering → score → alertes)
+  └─ pyrovigil ingest        (FIRMS + MTG → localisation → clustering → score → alertes)
       └─ pyrovigil export    (events.geojson + hotspots.geojson + index.html)
           ├─ renvoie pyrovigil.db dans la Release
           └─ déploie dist/ sur Vercel
 ```
+
+[`ingest-fast.yml`](.github/workflows/ingest-fast.yml), **toutes les 10 minutes** — MTG seul,
+`ingest --source mtg`, puis sauvegarde de la base. **Ni export, ni déploiement** : c'est ce qui rend la
+cadence tenable, le plan Vercel Hobby plafonnant à 100 déploiements par jour pour 144 créneaux. La carte
+reste donc horaire ; c'est l'**alerte Discord** qui descend à une trentaine de minutes.
+
+Les deux partagent le groupe `concurrency: ingest`, puisqu'ils écrivent la même base.
 
 La base SQLite vit comme **asset d'une Release GitHub** : mutable, gratuit, et sans impact sur l'historique
 git — un `.db` commité ajouterait plusieurs mégaoctets de binaire à chaque passage.
@@ -90,12 +107,15 @@ d'aucun backend : les fichiers statiques suffisent, et la même page fonctionne 
 
 | Secret | Nécessaire ? | Rôle |
 |---|---|---|
-| `FIRMS_MAP_KEY` | **oui** | sans elle, l'ingestion échoue |
+| `FIRMS_MAP_KEY` | **oui** | sans elle, `ingest.yml` n'a plus que MTG |
+| `LSASAF_USER`, `LSASAF_PASSWORD` | pour `ingest-fast.yml` | sans eux, la source MTG est ignorée et la latence reste celle de FIRMS |
 | `VERCEL_TOKEN`, `VERCEL_ORG_ID`, `VERCEL_PROJECT_ID` | non | sans eux, l'export part en artefact du workflow au lieu d'être déployé |
 | `DISCORD_WEBHOOK_URL` | non | sans lui, les alertes sont seulement journalisées |
 
 ```bash
 gh secret set FIRMS_MAP_KEY
+gh secret set LSASAF_USER         # https://mokey.lsasvcs.ipma.pt/auth/signup
+gh secret set LSASAF_PASSWORD
 gh secret set VERCEL_TOKEN        # https://vercel.com/account/tokens
 ```
 
@@ -104,15 +124,23 @@ gh secret set VERCEL_TOKEN        # https://vercel.com/account/tokens
 ### Pourquoi pas le cron Vercel
 
 Le plan Hobby limite les cron jobs à **une exécution par jour**, et une expression plus fréquente fait
-échouer le déploiement. GitHub Actions descend à 5 minutes, gratuitement. Une cadence horaire est de toute
-façon largement suffisante : la latence FIRMS mesurée est de 4 à 5 heures.
+échouer le déploiement. GitHub Actions descend à 5 minutes, gratuitement — c'est ce qui rend possible la
+boucle MTG à 10 minutes.
 
-### Deux limites à connaître
+### Trois limites à connaître
 
-**La base grossit d'environ 1 Mo par jour** (1800 hotspots quotidiens). Elle est téléchargée et renvoyée à
-chaque exécution : vers 6 mois de collecte, ce va-et-vient devient coûteux. Il faudra alors soit purger les
-`raw_hotspots` au-delà de N jours, soit passer sur Postgres (Neon a une offre gratuite) — la bascule ne
-touche que `db.py` et les requêtes de `api.py`.
+**Les tâches planifiées GitHub sont retardées sous charge.** `*/10` veut dire « environ toutes les 10
+minutes », pas « à la minute ». Et GitHub ne garde **qu'une seule exécution en attente** par groupe de
+concurrence : pendant que le job horaire tourne, un job rapproché peut être écarté. Sans gravité, le suivant
+arrive dans 10 minutes et l'ingestion MTG reprend systématiquement la dernière heure de créneaux. En
+pratique, compter 30 à 40 minutes de latence d'alerte plutôt que les 20 minutes du produit brut.
+
+**La base grossit** — de l'ordre d'1 Mo par jour pour FIRMS seul, davantage avec MTG, qui réobserve un feu
+persistant toutes les 10 minutes. Elle est téléchargée et renvoyée à chaque exécution, d'où la purge des
+`raw_hotspots` au-delà de **30 jours** (`cli.PURGE_DAYS`), suivie d'un `VACUUM` : sans lui SQLite réutilise
+les pages libérées mais ne rend jamais les octets. Les événements et les alertes, eux, sont conservés. Si le
+volume redevient un problème, la bascule vers Postgres (Neon a une offre gratuite) ne toucherait que `db.py`
+et les requêtes de `api.py`.
 
 **Les workflows planifiés sont désactivés après 60 jours sans activité sur le dépôt.** Sur un projet
 saisonnier, pensez à un commit de temps en temps hors saison.
@@ -128,13 +156,52 @@ Chaque point attribué garde sa raison, stockée avec l'événement et affichée
 | Puissance radiative (FRP) | +25 (≥ 100 MW), +15 (≥ 30), +8 (≥ 10) |
 | Confiance satellite | +20 haute, +10 nominale, −15 basse |
 | Forêt | +25 dedans, +15 (< 500 m), +8 (< 1500 m), −20 (> 5 km) |
-| Regroupement | +15 plusieurs pixels, +10 plusieurs satellites |
+| Regroupement | +15 plusieurs **positions** distinctes, +10 plusieurs satellites |
 
 Priorités : `low` < 30, `medium` 30–55, `high` 55–75, `critical` > 75. Une alerte part en `high` ou `critical`
 si la détection a moins d'une heure et qu'aucune alerte n'a été envoyée sur le même événement depuis deux heures.
 
 **Un critère dont la donnée manque vaut 0**, il ne pénalise pas à l'aveugle : c'est le cas du critère forêt
-hors de France, ou quand le service IGN est indisponible.
+hors de France, quand le service IGN est indisponible, ou de la confiance satellite sur une détection MTG.
+
+Le regroupement compte les **positions distinctes**, pas les lignes en base. Une source géostationnaire
+réobserve le même pixel toutes les 10 minutes : compter les lignes accorderait le bonus « plusieurs pixels
+groupés » à un foyer unique vu six fois de suite.
+
+## La source MTG
+
+FIRMS dépend du passage d'un satellite en orbite polaire : deux à quatre survols par jour, et 4 à 5 heures
+entre l'acquisition et la disponibilité. Le produit **MTG FRP-PIXEL** ([LSA-509](https://lsa-saf.eumetsat.int/en/data/products/fire-products/),
+EUMETSAT / LSA SAF) est géostationnaire — il regarde l'Europe en permanence et publie **un fichier toutes les
+10 minutes**, 20 à 45 minutes après l'acquisition.
+
+Les deux sources ne se remplacent pas, elles se complètent :
+
+| | FIRMS (VIIRS / MODIS) | MTG (FCI) |
+|---|---|---|
+| Orbite | polaire | géostationnaire |
+| Résolution | 375 m (VIIRS) | 1 km |
+| Cadence | 2 à 4 passages / jour | 10 minutes |
+| Latence | 4 à 5 h | 20 à 45 min |
+| Voit bien | les petits feux | les feux qui démarrent |
+
+MTG voit vite et gros, FIRMS voit fin et tard. Un feu vu par les deux gagne d'office le « confirmé par
+plusieurs satellites » du barème, sans qu'aucune règle spécifique ait été ajoutée : `events.summarize` compte
+déjà les satellites distincts.
+
+**Ce qu'il faut savoir avant de s'y fier :**
+
+- Le produit est en **statut « démonstration »** : sa disponibilité n'est pas garantie. Un créneau manquant
+  est donc traité comme un cas normal — on journalise et on passe au suivant, jamais d'échec bruyant. Chaque
+  ingestion reprend la dernière heure de créneaux, ce qui rattrape les trous tout seul.
+- Le produit fournit une **incertitude en MW, pas une classe de confiance**. Traduire l'une en l'autre est
+  une décision de barème, pas de parsing : `confidence` vaut `unknown`, donc 0 point — la règle du projet
+  pour un critère absent. Une détection MTG doit donc gagner ses points sur la fraîcheur, le FRP et la forêt.
+- Le fichier couvre **tout le disque Meteosat**. Le filtre sur l'emprise France tombe avant toute autre
+  chose, sans quoi l'Afrique en saison de brûlis constituerait l'essentiel de ce qu'on ingère.
+
+Le même répertoire publie chaque créneau en `.csv.gz` et en `.nc`. On lit le CSV : `urllib`, `gzip` et `csv`
+de la stdlib suffisent, là où le NetCDF imposerait `netCDF4` pour la même information.
 
 ## La couche forêt
 
@@ -178,8 +245,8 @@ requêtes de `api.py`.
 uv run python tests/test_pyrovigil.py    # tourne aussi sous pytest
 ```
 
-28 vérifications : parsing FIRMS, déduplication, tolérance aux pannes de source, filtre France, distance à
-la forêt, clustering, stabilité des identifiants d'événements, barème de score, anti-spam.
+37 vérifications : parsing FIRMS et MTG, déduplication, tolérance aux pannes de source, filtre France,
+distance à la forêt, clustering, stabilité des identifiants d'événements, barème de score, purge, anti-spam.
 
 ## Limites
 
@@ -189,16 +256,23 @@ ou s'il démarre entre deux passages orbitaux.
 **Faux positifs** — torchères, sites industriels, aciéries, feux agricoles, surfaces minérales très chaudes,
 pixels mal géolocalisés. C'est le principal ennemi du projet, d'où le filtrage forêt et le score.
 
-**Latence** — passage satellite + traitement NASA + disponibilité API + intervalle de polling. Compter de
-quelques dizaines de minutes à plusieurs heures. Les satellites géostationnaires (MTG/Meteosat) sont la piste
-pour descendre nettement.
+**Latence** — acquisition + traitement + disponibilité API + intervalle de polling. Une trentaine de minutes
+par MTG, 4 à 5 heures par FIRMS. Descendre plus bas demanderait de sortir du satellite : les caméras au sol
+(Pyronear) détectent en moins d'une minute, mais leur API est réservée aux SDIS partenaires.
+
+**Barème à recalibrer sur MTG** — non mesuré à ce jour. Une détection MTG fraîche en forêt atteint
+mécaniquement 55 points (+30 fraîcheur, +25 forêt), soit le seuil `high`, donc l'alerte. C'est peut-être le
+bon comportement — un feu de 20 MW et plus dans un massif *mérite* un coup d'œil — mais c'est à vérifier sur
+une vraie saison avant de conclure. Le premier été de MTG servira de mesure.
 
 ## Suite
 
-Météo dans le score (Open-Meteo, Météo des forêts) · détection des zones industrielles récurrentes ·
-recalibrage du barème forêt · import BDIFF et backtesting · EFFIS · Sentinel-3 FRP · MTG/FCI · modèle LightGBM.
+Recalibrage du barème sur les détections MTG · météo dans le score (Open-Meteo, Météo des forêts) ·
+détection des zones industrielles récurrentes · recalibrage du barème forêt · import BDIFF et backtesting ·
+EFFIS · Sentinel-3 FRP · modèle LightGBM.
 
 ## Données
 
-NASA FIRMS · [contours des départements](https://france-geojson.gregoiredavid.fr/) · [Masque Forêt IGN](https://data.geopf.fr/) · fonds de carte
-© OpenStreetMap.
+NASA FIRMS · [MTG FRP-PIXEL, EUMETSAT / LSA SAF](https://lsa-saf.eumetsat.int/en/data/products/fire-products/)
+(CC BY 4.0) · [contours des départements](https://france-geojson.gregoiredavid.fr/) ·
+[Masque Forêt IGN](https://data.geopf.fr/) · fonds de carte © OpenStreetMap.

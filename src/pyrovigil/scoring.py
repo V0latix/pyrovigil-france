@@ -64,10 +64,15 @@ def _forest(in_forest: int | None, distance_m: float | None) -> list[tuple[str, 
     return []
 
 
-def _cluster(hotspot_count: int, source_count: int) -> list[tuple[str, int]]:
+def _cluster(pixel_count: int, source_count: int) -> list[tuple[str, int]]:
+    """`pixel_count` compte les positions distinctes, pas les lignes.
+
+    Une source géostationnaire réobserve le même pixel toutes les 10 min : compter les lignes
+    accorderait le bonus de regroupement à un foyer unique vu six fois.
+    """
     reasons = []
-    if hotspot_count > 1:
-        reasons.append((f"{hotspot_count} pixels chauds groupés", 15))
+    if pixel_count > 1:
+        reasons.append((f"{pixel_count} pixels chauds groupés", 15))
     if source_count > 1:
         reasons.append((f"confirmé par {source_count} satellites", 10))
     return reasons
@@ -90,7 +95,10 @@ def score_event(event: dict, confidence: str | None = None, now: datetime | None
     reasons += _frp(event.get("max_frp"))
     reasons += _confidence(confidence or event.get("confidence"))
     reasons += _forest(event.get("in_forest"), event.get("forest_distance_m"))
-    reasons += _cluster(event.get("hotspot_count") or 1, event.get("source_count") or 1)
+    # repli sur hotspot_count pour les lignes fire_events déjà en base, qui n'ont pas de pixel_count
+    reasons += _cluster(
+        event.get("pixel_count") or event.get("hotspot_count") or 1, event.get("source_count") or 1
+    )
     # ponytail: critères météo (vent, humidité, Météo des forêts) et détection des zones industrielles
     # non implémentés en v1 — ils s'ajoutent ici sans toucher au reste.
 
