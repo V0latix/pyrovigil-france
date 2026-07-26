@@ -42,7 +42,7 @@ class FirmsError(RuntimeError):
 
 
 @contextlib.contextmanager
-def _ipv4_only():
+def ipv4_only():
     """Force la résolution DNS en IPv4 le temps d'une requête.
 
     ponytail: les runners GitHub Actions n'ont pas toujours de route IPv6. Quand la résolution renvoie
@@ -67,7 +67,7 @@ def _get(url: str, timeout: int = 60, attempts: int = 3) -> str:
     last: Exception | None = None
     for attempt in range(attempts):
         try:
-            with _ipv4_only(), urllib.request.urlopen(url, timeout=timeout) as response:
+            with ipv4_only(), urllib.request.urlopen(url, timeout=timeout) as response:
                 return response.read().decode("utf-8", errors="replace")
         except (urllib.error.URLError, TimeoutError, OSError) as exc:
             last = exc

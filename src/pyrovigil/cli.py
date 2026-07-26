@@ -22,13 +22,9 @@ FIXTURE = DATA_DIR / "firms_sample.csv"
 
 def cmd_fetch_data(args: argparse.Namespace) -> int:
     path = geo.download_departments(DATA_DIR)
-    index = geo.GeoIndex(DATA_DIR)
+    index = geo.GeoIndex(DATA_DIR, online=True)
     print(f"{len(index.departments)} départements téléchargés dans {path}")
-    if not index.has_forests:
-        print(
-            f"Pas de couche forêt ({DATA_DIR / geo.FORESTS_FILE} absent) : le score ignorera le critère\n"
-            "forêt. Voir le README pour importer la BD Forêt IGN."
-        )
+    print(f"Couche forêt : {index.forest_source}, interrogée à la demande — rien à télécharger.")
     return 0
 
 
@@ -51,13 +47,16 @@ def cmd_ingest(args: argparse.Namespace) -> int:
         inserted = firms.ingest(conn, map_key, day_range=args.days)
         print(f"{inserted} nouveaux hotspots (FIRMS, {args.days} j)")
 
-    index = geo.GeoIndex(DATA_DIR)
+    index = geo.GeoIndex(DATA_DIR, online=True)
     if index.has_departments:
         enriched = geo.enrich_hotspots(conn, index)
         in_france = conn.execute(
             "SELECT count(*) FROM raw_hotspots WHERE in_france = 1"
         ).fetchone()[0]
-        print(f"{enriched} hotspots localisés, {in_france} en France")
+        in_forest = conn.execute(
+            "SELECT count(*) FROM raw_hotspots WHERE in_forest = 1"
+        ).fetchone()[0]
+        print(f"{enriched} hotspots localisés, {in_france} en France, {in_forest} en forêt")
     else:
         print("Masque France absent : lancez `pyrovigil fetch-data`", file=sys.stderr)
 

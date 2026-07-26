@@ -42,7 +42,7 @@ Pour une surveillance continue, une ligne de cron suffit — la commande est ide
 
 | Commande | Rôle |
 |---|---|
-| `pyrovigil fetch-data` | télécharge les couches géographiques |
+| `pyrovigil fetch-data` | télécharge les contours des départements |
 | `pyrovigil ingest` | récupère FIRMS, localise, clusterise, score, alerte |
 | `pyrovigil ingest --fixture` | idem sur le CSV local, sans clé API |
 | `pyrovigil ingest --loop 600` | répète toutes les 10 minutes |
@@ -133,21 +133,28 @@ Chaque point attribué garde sa raison, stockée avec l'événement et affichée
 Priorités : `low` < 30, `medium` 30–55, `high` 55–75, `critical` > 75. Une alerte part en `high` ou `critical`
 si la détection a moins d'une heure et qu'aucune alerte n'a été envoyée sur le même événement depuis deux heures.
 
-**Un critère dont la donnée manque vaut 0**, il ne pénalise pas à l'aveugle. C'est notamment le cas du critère
-forêt tant que la couche n'est pas installée.
+**Un critère dont la donnée manque vaut 0**, il ne pénalise pas à l'aveugle : c'est le cas du critère forêt
+hors de France, ou quand le service IGN est indisponible.
 
-## Ajouter la couche forêt
+## La couche forêt
 
-Sans elle, le critère forêt est neutre et les faux positifs industriels ne sont pas filtrés — sur le jeu de
-démonstration, la torchère de Fos-sur-Mer ressort en `high`, ce qui illustre exactement le problème.
+Rien à installer : chaque hotspot situé en France est confronté au
+[Masque Forêt IGN 2021-2023](https://www.data.gouv.fr/datasets/masque-foret/), interrogé en WFS sur la
+Géoplateforme, sans clé. Le national pèse 1,26 million de polygones — trop pour un fichier — mais les
+détections sont géographiquement groupées : on ne télécharge que les tuiles de 0,1° qui en contiennent,
+une fois chacune, en mémoire pour la durée du processus. Compter une requête par tuile, moins d'une
+seconde, quelques dizaines de mégaoctets jamais écrits sur disque.
 
-Déposez un GeoJSON de polygones forestiers en `data/forests.geojson` (EPSG:4326), puis relancez
-`pyrovigil ingest` : les hotspots existants sont relocalisés automatiquement. Sources possibles :
-[BD Forêt IGN](https://www.data.gouv.fr/datasets/bd-foret-r/),
-[Masque Forêt IGN](https://www.data.gouv.fr/datasets/masque-foret/),
-[CORINE Land Cover](https://www.data.gouv.fr/datasets/corine-land-cover-occupation-des-sols-en-france/).
-Ces jeux pèsent plusieurs gigaoctets : simplifiez les géométries (`mapshaper -simplify 5%`) avant import, tout
-est chargé en mémoire.
+Si l'IGN ne répond pas, `in_forest` reste `NULL` : le critère forêt vaut 0 et l'ingestion suivante réessaie.
+Pour travailler hors ligne ou sur une autre source, déposez un GeoJSON de polygones (EPSG:4326) en
+`data/forests.geojson` : il devient prioritaire et supprime tout appel réseau.
+
+**Ce que la couche apporte, mesuré** — sur les 1 632 hotspots France de la base de démonstration, 84 %
+tombent *dans* une forêt et aucun n'est à plus de 1,1 km d'un bois : en France, être près d'un massif ne
+distingue presque rien, et la pénalité « à plus de 5 km de toute forêt » du barème ne se déclenche jamais.
+La torchère de Fos-sur-Mer, elle, est bien classée hors forêt — à 550 m d'un bosquet, donc +8 au lieu de
++25. La couche cesse de créditer les sites industriels d'un bonus forestier, mais ne les élimine pas :
+c'est la détection des zones industrielles récurrentes qui le fera.
 
 ## Choix techniques
 
@@ -171,7 +178,7 @@ requêtes de `api.py`.
 uv run python tests/test_pyrovigil.py    # tourne aussi sous pytest
 ```
 
-24 vérifications : parsing FIRMS, déduplication, tolérance aux pannes de source, filtre France, distance à
+28 vérifications : parsing FIRMS, déduplication, tolérance aux pannes de source, filtre France, distance à
 la forêt, clustering, stabilité des identifiants d'événements, barème de score, anti-spam.
 
 ## Limites
@@ -189,9 +196,9 @@ pour descendre nettement.
 ## Suite
 
 Météo dans le score (Open-Meteo, Météo des forêts) · détection des zones industrielles récurrentes ·
-masque forêt IGN · import BDIFF et backtesting · EFFIS · Sentinel-3 FRP · MTG/FCI · modèle LightGBM.
+recalibrage du barème forêt · import BDIFF et backtesting · EFFIS · Sentinel-3 FRP · MTG/FCI · modèle LightGBM.
 
 ## Données
 
-NASA FIRMS · [contours des départements](https://france-geojson.gregoiredavid.fr/) · fonds de carte
+NASA FIRMS · [contours des départements](https://france-geojson.gregoiredavid.fr/) · [Masque Forêt IGN](https://data.geopf.fr/) · fonds de carte
 © OpenStreetMap.

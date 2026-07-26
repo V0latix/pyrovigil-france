@@ -7,6 +7,7 @@ géographie, clustering, scoring, anti-spam.
 
 from __future__ import annotations
 
+import contextlib
 import json
 import sys
 import tempfile
@@ -87,9 +88,9 @@ def test_filtre_france_et_departements():
     assert index.locate(41.3874, 2.1686)["in_france"] == 0
 
 
-def test_distance_a_la_foret():
-    # carré de forêt fictif : lon 6.30->6.40, lat 43.10->43.20
-    polygon = {
+def _carre_foret() -> dict:
+    """Carré de forêt fictif : lon 6.30->6.40, lat 43.10->43.20."""
+    return {
         "type": "FeatureCollection",
         "features": [
             {
@@ -104,8 +105,11 @@ def test_distance_a_la_foret():
             }
         ],
     }
+
+
+def test_distance_a_la_foret():
     with tempfile.TemporaryDirectory() as tmp:
-        (Path(tmp) / geo.FORESTS_FILE).write_text(json.dumps(polygon))
+        (Path(tmp) / geo.FORESTS_FILE).write_text(json.dumps(_carre_foret()))
         index = geo.GeoIndex(Path(tmp))
         assert index.has_forests
 
@@ -122,9 +126,59 @@ def test_distance_a_la_foret():
 
 def test_sans_couche_foret():
     with tempfile.TemporaryDirectory() as tmp:
-        index = geo.GeoIndex(Path(tmp))
+        index = geo.GeoIndex(Path(tmp))  # hors ligne par défaut : aucun appel réseau dans les tests
         assert index.forest(43.15, 6.35) == (None, None)
         assert index.locate(43.15, 6.35)["in_forest"] is None
+
+
+@contextlib.contextmanager
+def _faux_masque_foret(reponse=_carre_foret):
+    """Remplace l'appel au WFS IGN et enregistre les tuiles demandées."""
+    appels: list[tuple[int, int]] = []
+
+    def faux_wfs(tile_lat, tile_lon):
+        appels.append((tile_lat, tile_lon))
+        return reponse()
+
+    original = geo._fetch_forest_tile
+    geo._fetch_forest_tile = faux_wfs
+    try:
+        yield appels
+    finally:
+        geo._fetch_forest_tile = original
+
+
+def test_masque_foret_ign_par_tuile():
+    with _faux_masque_foret() as appels, tempfile.TemporaryDirectory() as tmp:
+        index = geo.GeoIndex(Path(tmp), online=True)
+        assert index.has_forests
+
+        assert index.forest(43.15, 6.35) == (True, 0.0), "point au cœur de la forêt"
+        assert index.forest(43.15, 6.39)[0] is True, "même point de vue de la tuile"
+        assert appels == [(431, 63)], "une seule requête pour une même tuile de 0,1°"
+
+        # tuile voisine : une requête de plus, distance plafonnée
+        assert index.forest(43.15, 6.60) == (False, geo.MAX_FOREST_SEARCH_M)
+        assert appels == [(431, 63), (431, 65)]
+
+
+def test_masque_foret_injoignable_reste_neutre():
+    with _faux_masque_foret(reponse=lambda: None) as appels, tempfile.TemporaryDirectory() as tmp:
+        index = geo.GeoIndex(Path(tmp), online=True)
+        assert index.forest(43.15, 6.35) == (None, None), "panne IGN : critère neutre, pas pénalisant"
+        index.forest(43.16, 6.36)
+        assert len(appels) == 1, "un échec ne se rejoue pas pour chaque point de la tuile"
+
+
+def test_pas_de_requete_foret_hors_de_France():
+    with _faux_masque_foret() as appels:
+        index = geo.GeoIndex(DATA_DIR, online=True)
+        if not index.has_departments:
+            return
+        assert index.locate(41.3874, 2.1686)["in_forest"] is None, "Barcelone : le masque IGN ne dit rien"
+        assert appels == []
+        assert index.locate(43.15, 6.35)["in_forest"] == 1
+        assert appels == [(431, 63)]
 
 
 def test_resolution_ipv4_restauree_meme_en_cas_d_erreur():
@@ -132,7 +186,7 @@ def test_resolution_ipv4_restauree_meme_en_cas_d_erreur():
 
     original = socket.getaddrinfo
 
-    with firms._ipv4_only():
+    with firms.ipv4_only():
         familles = {info[0] for info in socket.getaddrinfo("localhost", 80)}
         assert familles == {socket.AF_INET}, f"IPv6 non filtré : {familles}"
 
@@ -140,7 +194,7 @@ def test_resolution_ipv4_restauree_meme_en_cas_d_erreur():
 
     # même si la requête lève, le patch ne doit pas fuir sur le reste du processus
     try:
-        with firms._ipv4_only():
+        with firms.ipv4_only():
             raise RuntimeError("boum")
     except RuntimeError:
         pass

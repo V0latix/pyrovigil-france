@@ -65,13 +65,13 @@ def _event_payload(row: dict) -> dict:
 def health(conn: sqlite3.Connection = Depends(get_db)):
     hotspots = conn.execute("SELECT count(*) FROM raw_hotspots").fetchone()[0]
     latest = conn.execute("SELECT max(acquisition_time) FROM raw_hotspots").fetchone()[0]
-    index = geo.GeoIndex(DATA_DIR)
+    index = geo.GeoIndex(DATA_DIR, online=True)
     return {
         "status": "ok",
         "hotspots": hotspots,
         "latest_acquisition": latest,
         "departments_loaded": index.has_departments,
-        "forests_loaded": index.has_forests,
+        "forests": index.forest_source,
     }
 
 
@@ -187,7 +187,7 @@ def admin_ingest(days: int = Query(1, ge=1, le=10), conn: sqlite3.Connection = D
     if not map_key:
         raise HTTPException(503, "FIRMS_MAP_KEY non configurée")
     inserted = firms.ingest(conn, map_key, day_range=days)
-    index = geo.GeoIndex(DATA_DIR)
+    index = geo.GeoIndex(DATA_DIR, online=True)
     enriched = geo.enrich_hotspots(conn, index)
     stats = events.rebuild_events(conn)
     sent = alerts.send_alerts(conn, os.environ.get("DISCORD_WEBHOOK_URL"))
@@ -210,7 +210,7 @@ def admin_recompute(
     window_hours: int = Query(events.DEFAULT_WINDOW_HOURS, ge=1, le=720),
     conn: sqlite3.Connection = Depends(get_db),
 ):
-    enriched = geo.enrich_hotspots(conn, geo.GeoIndex(DATA_DIR))
+    enriched = geo.enrich_hotspots(conn, geo.GeoIndex(DATA_DIR, online=True))
     return {"enriched": enriched, **events.rebuild_events(conn, window_hours=window_hours)}
 
 
