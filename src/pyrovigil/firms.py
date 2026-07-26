@@ -9,10 +9,12 @@ marteau-pilon.
 
 from __future__ import annotations
 
+import contextlib
 import csv
 import io
 import json
 import logging
+import socket
 import sqlite3
 import time
 import urllib.error
@@ -39,14 +41,35 @@ class FirmsError(RuntimeError):
     pass
 
 
+@contextlib.contextmanager
+def _ipv4_only():
+    """Force la résolution DNS en IPv4 le temps d'une requête.
+
+    ponytail: les runners GitHub Actions n'ont pas toujours de route IPv6. Quand la résolution renvoie
+    une adresse AAAA, urllib échoue en « Network is unreachable » (errno 101) sans se rabattre sur IPv4 —
+    un tiers de nos exécutions planifiées tombaient là-dessus. FIRMS est joignable en IPv4 partout, donc
+    on tranche. Le patch est limité à la durée de l'appel pour ne pas contaminer le reste du processus.
+    """
+    original = socket.getaddrinfo
+
+    def ipv4(host, port, family=0, *args, **kwargs):
+        return original(host, port, socket.AF_INET, *args, **kwargs)
+
+    socket.getaddrinfo = ipv4
+    try:
+        yield
+    finally:
+        socket.getaddrinfo = original
+
+
 def _get(url: str, timeout: int = 60, attempts: int = 3) -> str:
     """GET avec retry et backoff exponentiel — FIRMS renvoie régulièrement des 429/503."""
     last: Exception | None = None
     for attempt in range(attempts):
         try:
-            with urllib.request.urlopen(url, timeout=timeout) as response:
+            with _ipv4_only(), urllib.request.urlopen(url, timeout=timeout) as response:
                 return response.read().decode("utf-8", errors="replace")
-        except (urllib.error.URLError, TimeoutError) as exc:
+        except (urllib.error.URLError, TimeoutError, OSError) as exc:
             last = exc
             if attempt < attempts - 1:
                 time.sleep(2**attempt)

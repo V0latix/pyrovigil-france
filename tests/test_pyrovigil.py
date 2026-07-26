@@ -127,6 +127,26 @@ def test_sans_couche_foret():
         assert index.locate(43.15, 6.35)["in_forest"] is None
 
 
+def test_resolution_ipv4_restauree_meme_en_cas_d_erreur():
+    import socket
+
+    original = socket.getaddrinfo
+
+    with firms._ipv4_only():
+        familles = {info[0] for info in socket.getaddrinfo("localhost", 80)}
+        assert familles == {socket.AF_INET}, f"IPv6 non filtré : {familles}"
+
+    assert socket.getaddrinfo is original, "la résolution doit être restaurée"
+
+    # même si la requête lève, le patch ne doit pas fuir sur le reste du processus
+    try:
+        with firms._ipv4_only():
+            raise RuntimeError("boum")
+    except RuntimeError:
+        pass
+    assert socket.getaddrinfo is original
+
+
 def test_une_source_firms_en_panne_ne_bloque_pas_les_autres():
     conn = db.connect(":memory:")
     csv_texte = FIXTURE.read_text()
