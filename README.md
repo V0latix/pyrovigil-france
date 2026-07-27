@@ -162,7 +162,7 @@ Priorités : `low` < 30, `medium` 30–55, `high` 55–75, `critical` > 75. Une 
 si la détection a moins d'une heure et qu'aucune alerte n'a été envoyée sur le même événement depuis deux heures.
 
 **Un critère dont la donnée manque vaut 0**, il ne pénalise pas à l'aveugle : c'est le cas du critère forêt
-hors de France, quand le service IGN est indisponible, ou de la confiance satellite sur une détection MTG.
+hors de France, ou quand le service IGN est indisponible.
 
 Le regroupement compte les **positions distinctes**, pas les lignes en base. Une source géostationnaire
 réobserve le même pixel toutes les 10 minutes : compter les lignes accorderait le bonus « plusieurs pixels
@@ -180,7 +180,7 @@ Les deux sources ne se remplacent pas, elles se complètent :
 | | FIRMS (VIIRS / MODIS) | MTG (FCI) |
 |---|---|---|
 | Orbite | polaire | géostationnaire |
-| Résolution | 375 m (VIIRS) | 1 km |
+| Résolution | 375 m (VIIRS) | 1 km au nadir, ~1,5 à 1,9 km² sur la France |
 | Cadence | 2 à 4 passages / jour | 10 minutes |
 | Latence | 4 à 5 h | 20 à 45 min |
 | Voit bien | les petits feux | les feux qui démarrent |
@@ -194,11 +194,16 @@ déjà les satellites distincts.
 - Le produit est en **statut « démonstration »** : sa disponibilité n'est pas garantie. Un créneau manquant
   est donc traité comme un cas normal — on journalise et on passe au suivant, jamais d'échec bruyant. Chaque
   ingestion reprend la dernière heure de créneaux, ce qui rattrape les trous tout seul.
-- Le produit fournit une **incertitude en MW, pas une classe de confiance**. Traduire l'une en l'autre est
-  une décision de barème, pas de parsing : `confidence` vaut `unknown`, donc 0 point — la règle du projet
-  pour un critère absent. Une détection MTG doit donc gagner ses points sur la fraîcheur, le FRP et la forêt.
+- Le produit fournit un `FIRE_CONFIDENCE` **continu, de 0 à 1**, là où VIIRS donne trois classes. Il est
+  ramené aux classes du barème avec les mêmes seuils que la confiance MODIS en pourcentage, déjà traitée
+  dans `firms._confidence` : 0,8 et 0,3. C'est un précédent du projet, pas une calibration — les deux
+  échelles ne mesurent pas rigoureusement la même chose, et c'est à revoir avec le reste du barème MTG.
 - Le fichier couvre **tout le disque Meteosat**. Le filtre sur l'emprise France tombe avant toute autre
   chose, sans quoi l'Afrique en saison de brûlis constituerait l'essentiel de ce qu'on ingère.
+
+Le « 1 km » est la résolution au nadir, sous le satellite. La France est vue avec un angle zénithal de
+l'ordre de 53° depuis l'orbite à 0° de longitude : les pixels y font entre 1,5 et 1,9 km² (colonne
+`PIXEL_SIZE` du produit). C'est une raison de plus de garder FIRMS pour les petits foyers.
 
 Le même répertoire publie chaque créneau en `.csv.gz` et en `.nc`. On lit le CSV : `urllib`, `gzip` et `csv`
 de la stdlib suffisent, là où le NetCDF imposerait `netCDF4` pour la même information.
@@ -245,7 +250,7 @@ requêtes de `api.py`.
 uv run python tests/test_pyrovigil.py    # tourne aussi sous pytest
 ```
 
-37 vérifications : parsing FIRMS et MTG, déduplication, tolérance aux pannes de source, filtre France,
+38 vérifications : parsing FIRMS et MTG, déduplication, tolérance aux pannes de source, filtre France,
 distance à la forêt, clustering, stabilité des identifiants d'événements, barème de score, purge, anti-spam.
 
 ## Limites
@@ -260,10 +265,13 @@ pixels mal géolocalisés. C'est le principal ennemi du projet, d'où le filtrag
 par MTG, 4 à 5 heures par FIRMS. Descendre plus bas demanderait de sortir du satellite : les caméras au sol
 (Pyronear) détectent en moins d'une minute, mais leur API est réservée aux SDIS partenaires.
 
-**Barème à recalibrer sur MTG** — non mesuré à ce jour. Une détection MTG fraîche en forêt atteint
-mécaniquement 55 points (+30 fraîcheur, +25 forêt), soit le seuil `high`, donc l'alerte. C'est peut-être le
-bon comportement — un feu de 20 MW et plus dans un massif *mérite* un coup d'œil — mais c'est à vérifier sur
-une vraie saison avant de conclure. Le premier été de MTG servira de mesure.
+**Barème à recalibrer sur MTG** — première mesure, une heure de données du 27/07/2026 : 12 détections dans
+l'emprise, 4 en France, FRP de 10 à 25 MW, `FIRE_CONFIDENCE` étalé de 0,01 à 0,88. Une détection MTG fraîche
+en forêt et de confiance nominale cumule 73 points (+30 fraîcheur, +25 forêt, +10 confiance, +8 FRP), soit
+`high`, donc l'alerte ; en confiance haute elle passe `critical`. Autrement dit, **presque toute détection
+MTG en forêt alertera**, et 84 % des hotspots France tombent en forêt. L'anti-spam borne les dégâts à une
+alerte par événement toutes les deux heures, et c'est peut-être le bon comportement — mais si ça sature, ce
+sont les seuils qu'il faut revoir, pas la source qu'il faut retirer.
 
 ## Suite
 

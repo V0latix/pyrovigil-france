@@ -460,14 +460,12 @@ def test_message_alerte_contient_l_essentiel():
 
 # --- MTG FRP-PIXEL (LSA SAF) ------------------------------------------------------------------
 #
-# ponytail: en-tête reconstitué depuis la documentation LSA SAF, faute d'identifiants pour tirer un
-# vrai fichier. Les tests portent sur la logique — créneaux, emprise, déduplication, contrôle
-# d'en-tête — qui ne dépend pas des noms exacts. Si le premier passage réel révèle d'autres noms,
-# ils changent ici et dans `lsasaf.REQUIRED_COLUMNS`, pas dans le reste du module.
-MTG_LISTE = """LATITUDE,LONGITUDE,FRP,FRP_UNCERTAINTY
-43.1521,6.3487,118.6,12.4
-43.1602,6.3550,41.2,8.1
--12.4400,28.7100,315.0,30.0
+# Extrait d'un vrai ListProduct (27/07/2026), réduit aux colonnes que le parsing utilise : le
+# produit en publie 28. La dernière ligne est zambienne — le fichier couvre tout le disque Meteosat.
+MTG_LISTE = """FIRE_CONFIDENCE,PIXEL_SIZE,LONGITUDE,LATITUDE,FRP,FRP_UNCERTAINTY
+0.8823470916748047,1.92,6.3487,43.1521,118.6,12.4
+0.6012340916748047,1.66,6.3550,43.1602,41.2,8.1
+0.0100000000000000,1.51,28.7100,-12.4400,315.0,30.0
 """
 
 
@@ -488,8 +486,18 @@ def test_lsasaf_parse_liste():
     assert rows[0]["satellite"] == "MTG-I1"
     assert rows[0]["frp"] == 118.6
     assert rows[0]["acquisition_time"] == creneau, "l'horodatage vient du créneau, pas d'une colonne"
-    assert rows[0]["confidence"] == "unknown", "le produit ne fournit pas de classe de confiance"
     assert rows[0]["brightness"] is None and rows[0]["bright_ti4"] is None
+
+
+def test_lsasaf_confiance():
+    """FIRE_CONFIDENCE va de 0 à 1, aux mêmes seuils que la confiance MODIS en pourcentage."""
+    assert lsasaf._confidence(0.88) == "high"
+    assert lsasaf._confidence(0.60) == "nominal"
+    assert lsasaf._confidence(0.01) == "low"
+    assert lsasaf._confidence(None) == "unknown", "colonne absente : critère neutre, pas pénalisant"
+
+    confiances = [r["confidence"] for r in lsasaf.parse_list(MTG_LISTE, db.now_utc())]
+    assert confiances == ["high", "nominal"], confiances
 
 
 def test_lsasaf_en_tete_inattendu_leve():

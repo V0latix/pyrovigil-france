@@ -48,11 +48,12 @@ SLOTS_PER_HOUR = 6
 # On filtre sur la même emprise que FIRMS, avant de construire quoi que ce soit.
 WEST, SOUTH, EAST, NORTH = (float(value) for value in firms.BBOX_FRANCE.split(","))
 
-# Noms de colonnes du « ListProduct », d'après la documentation LSA SAF de la famille FRP.
-# ponytail: à confirmer sur un vrai fichier au premier passage avec des identifiants — d'où
-# le contrôle d'en-tête de `parse_list`, qui échoue en nommant ce qu'il a réellement reçu
-# plutôt que d'insérer des lignes vides en silence.
+# Colonnes du « ListProduct », vérifiées sur un fichier réel le 27/07/2026. Le produit en publie
+# 28 ; les autres décrivent la fenêtre de fond, la géométrie de visée et le détail des termes
+# d'incertitude. Le contrôle d'en-tête de `parse_list` reste : le produit est en démonstration,
+# et il vaut mieux échouer en nommant ce qu'on a reçu que d'insérer des lignes vides en silence.
 LATITUDE, LONGITUDE, FRP = "LATITUDE", "LONGITUDE", "FRP"
+FIRE_CONFIDENCE = "FIRE_CONFIDENCE"
 REQUIRED_COLUMNS = (LATITUDE, LONGITUDE, FRP)
 
 
@@ -67,6 +68,23 @@ class LsaSafAuthError(RuntimeError):
     pas être avalée comme une panne réseau. Sinon un job planifié annoncerait tranquillement
     « aucun feu » à chaque exécution.
     """
+
+
+def _confidence(value: float | None) -> str:
+    """FIRE_CONFIDENCE (0 à 1) vers les classes du barème.
+
+    ponytail: mêmes seuils que la confiance MODIS en pourcentage, déjà traitée dans
+    `firms._confidence` — 80 % et 30 %. C'est un précédent du projet, pas une calibration : les
+    deux échelles ne mesurent pas rigoureusement la même chose. À revoir sur une vraie saison,
+    avec le reste du barème MTG.
+    """
+    if value is None:
+        return "unknown"
+    if value >= 0.8:
+        return "high"
+    if value >= 0.3:
+        return "nominal"
+    return "low"
 
 
 def slots(now: datetime | None = None, count: int = SLOTS_PER_HOUR) -> list[datetime]:
@@ -155,10 +173,7 @@ def parse_list(text: str, slot: datetime) -> list[dict]:
                 "bright_ti4": None,
                 "bright_ti5": None,
                 "frp": firms._float(row, FRP),
-                # ponytail: le produit fournit une incertitude en MW, pas une classe de confiance.
-                # Traduire l'une en l'autre est une décision de barème, pas de parsing — « unknown »
-                # vaut 0 point dans scoring.py, ce qui est la règle du projet pour un critère absent.
-                "confidence": "unknown",
+                "confidence": _confidence(firms._float(row, FIRE_CONFIDENCE)),
                 "daynight": "",
                 "raw": json.dumps(row, ensure_ascii=False),
             }
