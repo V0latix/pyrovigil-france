@@ -26,8 +26,17 @@ test = une fonction `test_*` dans ce fichier ; `run_all()` la ramasse automatiqu
 - **Dates** : UTC, format `'YYYY-MM-DD HH:MM:SS'` partout. Les fonctions date de
   SQLite en dépendent (`db.py`).
 - **Appeler `api.*` hors FastAPI** exige de passer les valeurs par défaut
-  explicitement — sinon on récupère des objets `Query` (cf. `cli.py:110`).
+  explicitement — sinon on récupère des objets `Query` (cf. `cmd_export` dans `cli.py`).
+- **`firms.insert_hotspots` écrit pour les deux sources**, MTG compris — `lsasaf.ingest`
+  l'appelle. Le nom du module induit en erreur : toute modification du schéma
+  d'insertion ou de `hot_cells` passe par là.
+- **`hot_cells` survit à la purge** : 180 jours contre 30 pour `raw_hotspots`. La
+  supprimer avec les hotspots détruirait le critère de récurrence sans que rien n'échoue.
 - `pyrovigil.db` à la racine est gitignoré mais bien présent en local : c'est une
   vraie base, pas un artefact jetable.
-- Sans `FIRMS_MAP_KEY`, utiliser `pyrovigil ingest --fixture`.
+- Sans `FIRMS_MAP_KEY`, utiliser `pyrovigil ingest --fixture`. Sans `LSASAF_USER` /
+  `LSASAF_PASSWORD`, la source MTG est ignorée avec un avertissement — sauf si elle est
+  demandée explicitement (`--source mtg`), auquel cas la commande échoue.
+- **Discord répond 403 au `User-Agent` par défaut d'`urllib`.** `alerts.USER_AGENT` n'est
+  pas décoratif : sans lui, aucune alerte ne part et le statut passe en `failed`.
 - Pas de python-dotenv : `export $(grep -v '^#' .env | xargs)`.
