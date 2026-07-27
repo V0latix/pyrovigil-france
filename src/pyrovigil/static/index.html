@@ -116,6 +116,7 @@ const WINDOW_HOURS = 168;
 
 let hours = 24;
 let allEvents = [];
+let allSectors = [];
 let allHotspots = [];
 let events = [];
 
@@ -148,6 +149,7 @@ map.on('load', () => {
   // deux sources pour la même donnée : l'emprise au sol (polygones) et le centroïde (points).
   // À l'échelle de la France, une zone d'un kilomètre fait moins d'un pixel d'écran — le marqueur
   // reste donc nécessaire pour repérer un feu, et la zone prend le relais en zoomant.
+  map.addSource('sectors', { type: 'geojson', data: EMPTY });
   map.addSource('events', { type: 'geojson', data: EMPTY });
   map.addSource('events-points', { type: 'geojson', data: EMPTY });
   map.addSource('hotspots', { type: 'geojson', data: EMPTY });
@@ -168,6 +170,21 @@ map.on('load', () => {
   ];
   // rayon du marqueur : proportionnel au score, mais rétréci en zoomant pour laisser voir la zone
   const rayon = (f) => ['interpolate', ['linear'], ['get', 'risk_score'], 0, 5 * f, 100, 17 * f];
+
+  // le secteur : plusieurs foyers voisins que l'œil doit lire comme un seul sinistre. Il s'efface
+  // en zoomant, où les emprises individuelles prennent le relais.
+  map.addLayer({
+    id: 'sectors', type: 'fill', source: 'sectors', maxzoom: 11,
+    paint: { 'fill-color': ['match', ['get', 'priority'], 'critical', COLORS.critical, COLORS.high], 'fill-opacity': 0.08 }
+  });
+
+  map.addLayer({
+    id: 'sectors-contour', type: 'line', source: 'sectors', maxzoom: 11,
+    paint: {
+      'line-color': ['match', ['get', 'priority'], 'critical', COLORS.critical, COLORS.high],
+      'line-width': 1, 'line-opacity': 0.5, 'line-dasharray': [3, 2]
+    }
+  });
 
   // l'emprise au sol du feu : enveloppe des pixels chauds, dilatée d'un rayon de pixel
   map.addLayer({
@@ -219,12 +236,14 @@ map.on('load', () => {
 
 async function refresh() {
   try {
-    const [eventsGeo, hotspotsGeo] = await Promise.all([
+    const [eventsGeo, sectorsGeo, hotspotsGeo] = await Promise.all([
       fetch(`events.geojson?hours=${WINDOW_HOURS}`).then(r => r.json()),
-      // couche d'appoint, désactivée par défaut : son absence ne doit pas emporter la carte entière
+      // couches d'appoint : leur absence ne doit pas emporter la carte entière
+      fetch(`sectors.geojson?hours=${WINDOW_HOURS}`).then(r => r.json()).catch(() => EMPTY),
       fetch(`hotspots.geojson?hours=${WINDOW_HOURS}`).then(r => r.json()).catch(() => EMPTY)
     ]);
     allEvents = eventsGeo.features;
+    allSectors = sectorsGeo.features;
     allHotspots = hotspotsGeo.features;
     render();
   } catch (err) {
@@ -245,6 +264,10 @@ function render() {
       geometry: { type: 'Point', coordinates: [f.properties.longitude, f.properties.latitude] },
       properties: f.properties
     }))
+  });
+  map.getSource('sectors').setData({
+    type: 'FeatureCollection',
+    features: allSectors.filter(f => utc(f.properties.last_seen) >= cutoff)
   });
   map.getSource('hotspots').setData({ type: 'FeatureCollection', features: hotspotFeatures });
   events = eventFeatures.map(f => f.properties);

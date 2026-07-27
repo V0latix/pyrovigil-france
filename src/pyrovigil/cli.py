@@ -23,6 +23,10 @@ FIXTURE = DATA_DIR / "firms_sample.csv"
 # vers la Release GitHub à chaque exécution. Les événements et les alertes, eux, restent.
 PURGE_DAYS = 30
 
+# La mémoire des sites récurrents vit bien plus longtemps que les pixels bruts : c'est la durée qui
+# fait sa valeur. Elle ne pèse que quelques centaines de lignes par jour pour toute la France.
+CELLS_PURGE_DAYS = 180
+
 AIDE_FIRMS = (
     "FIRMS_MAP_KEY manquante. Clé gratuite et immédiate sur\n"
     "  https://firms.modaps.eosdis.nasa.gov/api/map_key\n"
@@ -89,6 +93,7 @@ def _purge(conn) -> int:
             "DELETE FROM raw_hotspots WHERE acquisition_time < datetime('now', ?)",
             (f"-{PURGE_DAYS} days",),
         ).rowcount
+        conn.execute("DELETE FROM hot_cells WHERE day < date('now', ?)", (f"-{CELLS_PURGE_DAYS} days",))
     if supprimes > 0:
         conn.execute("VACUUM")
     return supprimes
@@ -177,6 +182,7 @@ def cmd_export(args: argparse.Namespace) -> int:
     for name, payload in [
         # min_priority explicite : appelées hors FastAPI, les valeurs par défaut restent des objets Query
         ("events.geojson", api.events_geojson(hours=api.EXPORT_HOURS, min_priority="low", conn=conn)),
+        ("sectors.geojson", api.sectors_geojson(hours=api.EXPORT_HOURS, min_priority="low", conn=conn)),
         ("hotspots.geojson", api.hotspots_geojson(hours=api.EXPORT_HOURS, conn=conn)),
     ]:
         (out / name).write_text(json.dumps(payload), encoding="utf-8")

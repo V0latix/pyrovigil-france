@@ -145,6 +145,26 @@ def parse_csv(text: str, firms_source: str) -> list[dict]:
     return rows
 
 
+def _cell_row(row: dict) -> dict:
+    """Ligne `hot_cells` correspondant à un hotspot.
+
+    `daynight` vient de FIRMS ('D'/'N') ; MTG ne le fournit pas et laisse les deux drapeaux à 0,
+    donc le critère « vue de jour comme de nuit » ne se déclenche jamais sur MTG seul.
+    """
+    from .db import cell
+
+    lat_cell, lon_cell = cell(row["latitude"], row["longitude"])
+    daynight = (row.get("daynight") or "").strip().upper()
+    return {
+        "lat_cell": lat_cell,
+        "lon_cell": lon_cell,
+        "day": row["acquisition_time"].strftime("%Y-%m-%d"),
+        "max_frp": row["frp"],
+        "night": 1 if daynight == "N" else 0,
+        "day_pass": 1 if daynight == "D" else 0,
+    }
+
+
 def insert_hotspots(conn: sqlite3.Connection, rows: list[dict]) -> int:
     """Insère en ignorant les doublons (même satellite, même instant, même position).
 
@@ -157,6 +177,20 @@ def insert_hotspots(conn: sqlite3.Connection, rows: list[dict]) -> int:
 
     before = conn.execute("SELECT count(*) FROM raw_hotspots").fetchone()[0]
     with conn:
+        # Mémoire des sites récurrents, avant l'insertion des hotspots : elle enregistre ce qui a été
+        # *vu*, pas ce qui est nouveau. Un site déjà connu doit continuer de compter ses jours, sinon
+        # la déduplication l'effacerait de sa propre histoire. L'upsert est idempotent.
+        conn.executemany(
+            """
+            INSERT INTO hot_cells (lat_cell, lon_cell, day, max_frp, night, day_pass)
+            VALUES (:lat_cell, :lon_cell, :day, :max_frp, :night, :day_pass)
+            ON CONFLICT (lat_cell, lon_cell, day) DO UPDATE SET
+                max_frp  = max(coalesce(hot_cells.max_frp, 0), coalesce(excluded.max_frp, 0)),
+                night    = max(hot_cells.night, excluded.night),
+                day_pass = max(hot_cells.day_pass, excluded.day_pass)
+            """,
+            [_cell_row(row) for row in rows],
+        )
         conn.executemany(
             """
             INSERT OR IGNORE INTO raw_hotspots (

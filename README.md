@@ -68,7 +68,7 @@ Pour une surveillance continue, une ligne de cron suffit — la commande est ide
 | `GET /hotspots/recent?hours=24` | anomalies thermiques brutes |
 | `GET /events/recent?hours=24&min_priority=high` | événements triés par score |
 | `GET /events/{id}` | détail, hotspots rattachés, alertes envoyées |
-| `GET /events.geojson`, `GET /hotspots.geojson` | exports cartographiques |
+| `GET /events.geojson`, `GET /sectors.geojson`, `GET /hotspots.geojson` | exports cartographiques |
 | `POST /admin/ingest/firms` | ingestion à la demande |
 | `POST /admin/recompute-events` | recalcul clustering et scores |
 | `POST /admin/send-alerts` | rejoue la règle d'alerte |
@@ -85,7 +85,7 @@ Le dépôt s'héberge tout seul, sans serveur ni base managée. Deux workflows s
 ```
 récupère pyrovigil.db depuis la Release « data »
   └─ pyrovigil ingest        (FIRMS + MTG → localisation → clustering → score → alertes)
-      └─ pyrovigil export    (events.geojson + hotspots.geojson + index.html)
+      └─ pyrovigil export    (events + sectors + hotspots.geojson + index.html)
           ├─ renvoie pyrovigil.db dans la Release
           └─ déploie dist/ sur Vercel
 ```
@@ -164,6 +164,7 @@ Chaque point attribué garde sa raison, stockée avec l'événement et affichée
 | Confiance satellite | +20 haute, +10 nominale, −15 basse |
 | Forêt | +25 dedans, +15 (< 500 m), +8 (< 1500 m), −20 (> 5 km) |
 | Regroupement | +15 plusieurs **positions** distinctes, +10 plusieurs satellites |
+| Site récurrent | −30 (≥ 3 jours sur 30 sans jamais dépasser 15 MW), −40 si vu de jour comme de nuit |
 
 Priorités : `low` < 30, `medium` 30–55, `high` 55–75, `critical` > 75. Une alerte part en `high` ou `critical`
 si la détection a moins d'une heure et qu'aucune alerte n'a été envoyée sur le même événement depuis deux heures.
@@ -254,7 +255,56 @@ tombent *dans* une forêt et aucun n'est à plus de 1,1 km d'un bois : en France
 distingue presque rien, et la pénalité « à plus de 5 km de toute forêt » du barème ne se déclenche jamais.
 La torchère de Fos-sur-Mer, elle, est bien classée hors forêt — à 550 m d'un bosquet, donc +8 au lieu de
 +25. La couche cesse de créditer les sites industriels d'un bonus forestier, mais ne les élimine pas :
-c'est la détection des zones industrielles récurrentes qui le fera.
+c'est la détection des sites récurrents, ci-dessous, qui s'en charge.
+
+## Les sites récurrents
+
+Le principal ennemi du projet, ce sont les faux positifs : torchères, aciéries, carrières, feux agricoles.
+Ils ont un trait qu'un incendie n'a pas — **ils reviennent**. Un feu de forêt brûle une fois à cet endroit ;
+une usine s'y allume toutes les nuits.
+
+La table `hot_cells` accumule donc une ligne par case de ~1 km et par jour : puissance maximale vue, et
+deux drapeaux disant si la case a été détectée à un passage de nuit, de jour, ou aux deux. Un agrégat de
+quelques centaines de lignes par jour pour toute la France, **volontairement séparé de `raw_hotspots`** —
+celui-ci est purgé à 30 jours quand la mémoire des sites vit 180 jours, car c'est la durée qui fait sa
+valeur. Sur une base existante, elle se reconstruit toute seule au premier accès depuis les hotspots déjà
+présents, sans quoi le critère resterait muet pendant des semaines.
+
+Un événement est pénalisé quand sa case, ou l'une des huit voisines, s'est allumée **au moins 3 jours sur
+les 30 derniers sans jamais dépasser 15 MW**. Les voisines comptent parce qu'un même site change de case
+d'un passage à l'autre selon l'angle de visée.
+
+**Le plafond de puissance est ce qui rend la règle sûre.** Pénaliser le FRP faible en soi serait l'erreur
+inverse : un feu qui démarre *est* faible, et le détecter tôt est tout l'objet du projet. Ce n'est pas la
+faiblesse qui trahit l'usine, c'est la faiblesse **répétée au même endroit**. Un incendie qui dure trois
+jours s'allume tout autant, mais sa puissance le disqualifie de la règle. Et sur un site vierge, sans
+historique, le critère vaut 0 — il ne pénalise jamais un départ de feu.
+
+**Ce que ça donne, mesuré** — sur trois jours de données réelles, la règle a redécouvert seule la carte
+industrielle de l'Europe de l'Ouest : Dunkerque (51,05/2,30), Duisbourg, la vallée de la Fensch
+(49,32/6,15), Dillingen, Porcheville–Limay (48,98/1,76), Grandpuits, le port de Strasbourg, la
+pétrochimie de Tarragone — et **Fos-sur-Mer** (43,41/4,90), la torchère que la couche forêt savait
+déclasser sans l'éliminer. 17 événements français ont reçu le malus, **tous retombés en `low`**, dont 6
+en Gironde. Aucun n'alerte plus.
+
+Trois jours d'historique, c'est le minimum que la règle demande : elle se renforcera d'elle-même. Les
+seuils (3 jours, 15 MW, −30/−40) sont des points de départ mesurés sur un échantillon court, pas une
+calibration — à revoir après une saison.
+
+## Les secteurs
+
+Un grand incendie produit plusieurs événements : le front avance, des reprises apparaissent. Les séparer
+est juste physiquement, mais envoyer huit messages pour un seul sinistre revient à crier — et un système
+qui crie finit ignoré. Les événements voisins de moins de **5 km** sont donc regroupés en *secteurs*, qui
+ne servent qu'à deux choses : **une seule alerte Discord** par secteur, et une enveloppe sur la carte.
+
+Rien n'est stocké : le secteur se recalcule à chaque alerte et à chaque rendu. Une ligne `alerts` reste
+écrite par foyer, si bien que le cooldown de 2 h et la réalerte sur progression continuent de fonctionner
+par événement. Sur la carte, l'enveloppe pointillée s'efface au-delà du zoom 11 et laisse la place aux
+emprises individuelles : le secteur sert à repérer de loin, l'emprise à travailler de près.
+
+Mesuré sur la Gironde du 27/07/2026 : **84 foyers, 3 789 MW cumulés, un seul secteur** — et 5, 10 ou
+15 km de rayon donnent le même découpage, la structure spatiale étant bien plus nette que le seuil.
 
 ## Choix techniques
 
@@ -278,7 +328,7 @@ requêtes de `api.py`.
 uv run python tests/test_pyrovigil.py    # tourne aussi sous pytest
 ```
 
-43 vérifications : parsing FIRMS et MTG, déduplication, tolérance aux pannes de source, filtre France,
+53 vérifications : parsing FIRMS et MTG, déduplication, tolérance aux pannes de source, filtre France,
 distance à la forêt, clustering et emprise au sol, stabilité des identifiants d'événements, barème de
 score, purge, anti-spam et livraison Discord.
 
@@ -288,7 +338,9 @@ score, purge, anti-spam et livraison Discord.
 ou s'il démarre entre deux passages orbitaux.
 
 **Faux positifs** — torchères, sites industriels, aciéries, feux agricoles, surfaces minérales très chaudes,
-pixels mal géolocalisés. C'est le principal ennemi du projet, d'où le filtrage forêt et le score.
+pixels mal géolocalisés. C'est le principal ennemi du projet, d'où le filtrage forêt, le score et la détection
+des sites récurrents. Restent hors de portée les faux positifs *non* récurrents : un feu agricole ne brûle
+qu'une fois au même endroit, et rien ne le distingue aujourd'hui d'un départ d'incendie.
 
 **Latence** — acquisition + traitement + disponibilité API + intervalle de polling. Une trentaine de minutes
 par MTG, 4 à 5 heures par FIRMS. Descendre plus bas demanderait de sortir du satellite : les caméras au sol
@@ -305,7 +357,7 @@ sont les seuils qu'il faut revoir, pas la source qu'il faut retirer.
 ## Suite
 
 Recalibrage du barème sur les détections MTG · météo dans le score (Open-Meteo, Météo des forêts) ·
-détection des zones industrielles récurrentes · recalibrage du barème forêt · import BDIFF et backtesting ·
+recalibrage du barème forêt · import BDIFF et backtesting ·
 EFFIS · Sentinel-3 FRP · modèle LightGBM.
 
 ## Données

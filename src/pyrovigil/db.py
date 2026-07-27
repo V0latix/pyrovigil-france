@@ -95,7 +95,25 @@ CREATE TABLE IF NOT EXISTS alerts (
 );
 
 CREATE INDEX IF NOT EXISTS alerts_event_idx ON alerts (event_id, sent_at DESC);
+
+-- Mémoire longue des lieux qui s'allument : un agrégat d'une ligne par case de ~1 km et par jour.
+-- C'est ce qui distingue une torchère d'un feu — la première revient, le second non. Volontairement
+-- séparé de raw_hotspots, qui est purgé à 30 jours : la valeur du critère est justement dans la
+-- durée. Quelques centaines de lignes par jour pour toute la France.
+CREATE TABLE IF NOT EXISTS hot_cells (
+    lat_cell  INTEGER NOT NULL,          -- latitude / 0.01, soit ~1,1 km
+    lon_cell  INTEGER NOT NULL,          -- longitude / 0.01, ~0,8 km à 45°N
+    day       TEXT NOT NULL,             -- 'YYYY-MM-DD' de l'acquisition
+    max_frp   REAL,
+    night     INTEGER NOT NULL DEFAULT 0,  -- vue à un passage de nuit
+    day_pass  INTEGER NOT NULL DEFAULT 0,  -- vue à un passage de jour
+    PRIMARY KEY (lat_cell, lon_cell, day)
+);
+
+CREATE INDEX IF NOT EXISTS hot_cells_day_idx ON hot_cells (day);
 """
+
+CELL_DEGREES = 0.01
 
 
 def connect(path: str | Path | None = None) -> sqlite3.Connection:
@@ -109,7 +127,44 @@ def connect(path: str | Path | None = None) -> sqlite3.Connection:
     conn.row_factory = sqlite3.Row
     conn.execute("PRAGMA foreign_keys = ON")
     conn.executescript(SCHEMA)
+    _backfill_hot_cells(conn)
     return conn
+
+
+def _backfill_hot_cells(conn: sqlite3.Connection) -> None:
+    """Reconstruit la mémoire des sites depuis les hotspots déjà en base, une seule fois.
+
+    Sans ce rattrapage, le critère de récurrence démarrerait aveugle sur une base existante et
+    n'aurait rien à dire avant plusieurs semaines — alors que l'historique dont il a besoin est
+    déjà là. Le garde-fou sur la table vide fait que ça ne tourne qu'au tout premier accès.
+
+    ponytail: `round()` de SQLite arrondit le demi vers le haut là où celui de Python arrondit au
+    pair. Une case rattrapée peut donc différer d'une unité d'une case ingérée, sans conséquence :
+    `events.recurrence` interroge de toute façon la case et ses 8 voisines.
+    """
+    if conn.execute("SELECT EXISTS (SELECT 1 FROM hot_cells)").fetchone()[0]:
+        return
+    with conn:
+        conn.execute(
+            f"""
+            INSERT OR IGNORE INTO hot_cells (lat_cell, lon_cell, day, max_frp, night, day_pass)
+            SELECT CAST(round(latitude / {CELL_DEGREES}) AS INTEGER),
+                   CAST(round(longitude / {CELL_DEGREES}) AS INTEGER),
+                   date(acquisition_time), max(frp),
+                   max(daynight = 'N'), max(daynight = 'D')
+              FROM raw_hotspots
+             GROUP BY 1, 2, 3
+            """
+        )
+
+
+def cell(latitude: float, longitude: float) -> tuple[int, int]:
+    """Case de ~1 km servant de clé à `hot_cells`.
+
+    Assez large pour qu'un même site industriel retombe dans la même case d'un passage à l'autre
+    malgré la géolocalisation approximative des pixels, assez fine pour ne pas absorber un feu voisin.
+    """
+    return round(latitude / CELL_DEGREES), round(longitude / CELL_DEGREES)
 
 
 def to_sql(dt: datetime) -> str:

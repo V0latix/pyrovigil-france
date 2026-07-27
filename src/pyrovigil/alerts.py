@@ -16,6 +16,8 @@ import sqlite3
 import urllib.error
 import urllib.request
 
+from . import events
+
 logger = logging.getLogger("pyrovigil.alerts")
 
 ALERT_PRIORITIES = ("high", "critical")
@@ -85,6 +87,45 @@ def format_message(event: dict) -> str:
     )
 
 
+_PRIORITY_RANK = {"critical": 1, "high": 0}
+MAX_LISTED = 8
+
+
+def format_sector_message(group: list[dict]) -> str:
+    """Message unique pour plusieurs foyers voisins.
+
+    Un grand incendie produit plusieurs événements — le front avance, des reprises apparaissent.
+    Les séparer est juste physiquement, mais envoyer huit messages pour un seul sinistre revient à
+    crier, et un système qui crie finit ignoré.
+    """
+    group = sorted(group, key=lambda e: -(e.get("max_frp") or 0))
+    fort = group[0]
+    priorite = max(group, key=lambda e: _PRIORITY_RANK.get(e["priority"], -1))["priority"]
+    total = sum(e.get("max_frp") or 0 for e in group)
+    departements = sorted({e["department_code"] for e in group if e.get("department_code")})
+
+    lignes = "\n".join(
+        f"· {e['priority'].upper()} {e['risk_score']:.0f}/100 — {e.get('max_frp') or 0:.0f} MW "
+        f"à {e['latitude']:.4f}, {e['longitude']:.4f}"
+        for e in group[:MAX_LISTED]
+    )
+    if len(group) > MAX_LISTED:
+        lignes += f"\n· … et {len(group) - MAX_LISTED} autre(s) foyer(s)"
+
+    return (
+        f"🔥 **{len(group)} foyers groupés — {priorite.upper()}**\n"
+        f"Département(s) : {', '.join(departements) or 'inconnu'}\n"
+        f"FRP cumulé : {total:.0f} MW\n"
+        f"Foyer le plus puissant : {fort.get('max_frp') or 0:.0f} MW à "
+        f"{fort['latitude']:.5f}, {fort['longitude']:.5f}\n"
+        f"Dernière détection : {max(e['last_seen'] for e in group)} UTC\n\n"
+        f"{lignes}\n\n"
+        f"https://www.openstreetmap.org/?mlat={fort['latitude']}&mlon={fort['longitude']}#map=12/"
+        f"{fort['latitude']}/{fort['longitude']}\n"
+        f"_Signal satellite non vérifié — ne remplace pas les secours._"
+    )
+
+
 def _post_discord(webhook_url: str, content: str) -> None:
     request = urllib.request.Request(
         webhook_url,
@@ -103,8 +144,8 @@ def send_alerts(conn: sqlite3.Connection, webhook_url: str | None = None) -> lis
     déclenchement reste vérifiable en développement sans dépendre de Discord.
     """
     sent = []
-    for event in pending_events(conn):
-        content = format_message(event)
+    for group in events.sectors(pending_events(conn)):
+        content = format_message(group[0]) if len(group) == 1 else format_sector_message(group)
         status = "sent"
 
         if webhook_url:
@@ -112,24 +153,31 @@ def send_alerts(conn: sqlite3.Connection, webhook_url: str | None = None) -> lis
                 _post_discord(webhook_url, content)
             except (urllib.error.URLError, TimeoutError) as exc:
                 status = "failed"
-                logger.warning("échec de l'envoi Discord pour l'événement %s : %s", event["id"], exc)
+                logger.warning(
+                    "échec de l'envoi Discord pour %s : %s",
+                    ", ".join(str(e["id"]) for e in group),
+                    exc,
+                )
         else:
             status = "logged"
             logger.info("alerte (aucun webhook configuré) :\n%s", content)
 
+        # une ligne par foyer, même quand le message est unique : le cooldown de 2 h et la réalerte
+        # sur progression restent gouvernés par événement, sans rien changer au schéma
         with conn:
-            conn.execute(
-                """
-                INSERT INTO alerts (event_id, channel, payload, risk_score_at_send, delivery_status)
-                VALUES (:event_id, :channel, :payload, :risk_score, :status)
-                """,
-                {
-                    "event_id": event["id"],
-                    "channel": "discord" if webhook_url else "log",
-                    "payload": json.dumps({"content": content}, ensure_ascii=False),
-                    "risk_score": event["risk_score"],
-                    "status": status,
-                },
-            )
-        sent.append({"event_id": event["id"], "priority": event["priority"], "status": status})
+            for event in group:
+                conn.execute(
+                    """
+                    INSERT INTO alerts (event_id, channel, payload, risk_score_at_send, delivery_status)
+                    VALUES (:event_id, :channel, :payload, :risk_score, :status)
+                    """,
+                    {
+                        "event_id": event["id"],
+                        "channel": "discord" if webhook_url else "log",
+                        "payload": json.dumps({"content": content}, ensure_ascii=False),
+                        "risk_score": event["risk_score"],
+                        "status": status,
+                    },
+                )
+                sent.append({"event_id": event["id"], "priority": event["priority"], "status": status})
     return sent

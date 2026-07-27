@@ -322,6 +322,152 @@ def test_emprise_au_sol():
     assert etendue > 4000, etendue
 
 
+# --- sites récurrents et secteurs ---------------------------------------------------------------
+
+
+def _allume(conn, latitude, longitude, jours, frp, night=0, day_pass=0):
+    """Inscrit une case comme allumée pendant N jours consécutifs, en remontant depuis hier."""
+    lat_cell, lon_cell = db.cell(latitude, longitude)
+    for n in range(1, jours + 1):
+        conn.execute(
+            "INSERT OR REPLACE INTO hot_cells (lat_cell, lon_cell, day, max_frp, night, day_pass)"
+            " VALUES (?, ?, date('now', ?), ?, ?, ?)",
+            (lat_cell, lon_cell, f"-{n} days", frp, night, day_pass),
+        )
+    conn.commit()
+
+
+def test_hot_cells_alimente_a_l_ingestion():
+    conn = db.connect(":memory:")
+    firms.ingest_fixture(conn, FIXTURE)
+
+    cases = conn.execute("SELECT count(*) FROM hot_cells").fetchone()[0]
+    assert cases > 0, "l'ingestion doit alimenter la mémoire des sites"
+
+    avant = conn.execute("SELECT lat_cell, lon_cell, day, max_frp FROM hot_cells ORDER BY 1,2,3").fetchall()
+    firms.ingest_fixture(conn, FIXTURE)
+    apres = conn.execute("SELECT lat_cell, lon_cell, day, max_frp FROM hot_cells ORDER BY 1,2,3").fetchall()
+    assert [tuple(r) for r in avant] == [tuple(r) for r in apres], "l'upsert doit être idempotent"
+
+    # la nuit et le jour sont bien distingués — la fixture contient un point nocturne
+    assert conn.execute("SELECT max(night) FROM hot_cells").fetchone()[0] == 1
+
+
+def test_purge_conserve_les_sites_recurrents():
+    """La purge des hotspots ne doit pas effacer la mémoire : sa valeur est justement la durée."""
+    from pyrovigil import cli
+
+    conn = db.connect(":memory:")
+    firms.ingest_fixture(conn, FIXTURE)
+    conn.execute("UPDATE raw_hotspots SET acquisition_time = datetime('now','-60 days')")
+    conn.commit()
+    cases = conn.execute("SELECT count(*) FROM hot_cells").fetchone()[0]
+
+    cli._purge(conn)
+    assert conn.execute("SELECT count(*) FROM raw_hotspots").fetchone()[0] == 0
+    assert conn.execute("SELECT count(*) FROM hot_cells").fetchone()[0] == cases
+
+
+def test_site_recurrent_de_faible_puissance_est_penalise():
+    conn = db.connect(":memory:")
+    _allume(conn, 51.04, 2.30, jours=5, frp=9.0)  # profil mesuré à Dunkerque
+
+    historique = events.recurrence(conn, 51.04, 2.30)
+    assert historique["days"] == 5
+    raisons = scoring.score_event(_event(), confidence="high", recurrence=historique)["reasons"]
+    assert any("site allumé 5 jours" in motif for motif, _ in raisons), raisons
+    assert sum(points for _, points in raisons if points < 0) == -30
+
+
+def test_incendie_qui_dure_n_est_pas_un_site_recurrent():
+    """Un feu de plusieurs jours s'allume aussi souvent : c'est sa puissance qui l'en distingue."""
+    conn = db.connect(":memory:")
+    _allume(conn, 44.90, -0.96, jours=5, frp=220.0)
+
+    raisons = scoring.score_event(
+        _event(), confidence="high", recurrence=events.recurrence(conn, 44.90, -0.96)
+    )["reasons"]
+    assert not any("site allumé" in motif for motif, _ in raisons), raisons
+
+
+def test_depart_de_feu_sur_site_vierge_non_penalise():
+    conn = db.connect(":memory:")
+    sans_historique = scoring.score_event(_event(), confidence="high", recurrence=events.recurrence(conn, 43.15, 6.35))
+    _allume(conn, 43.15, 6.35, jours=1, frp=4.0)
+    un_seul_jour = scoring.score_event(_event(), confidence="high", recurrence=events.recurrence(conn, 43.15, 6.35))
+
+    assert sans_historique["risk_score"] == un_seul_jour["risk_score"]
+    assert not any("site allumé" in motif for motif, _ in un_seul_jour["reasons"])
+
+
+def test_source_vue_jour_et_nuit_penalisee_davantage():
+    conn = db.connect(":memory:")
+    _allume(conn, 49.32, 6.15, jours=4, frp=8.0, night=1, day_pass=1)
+
+    raisons = scoring.score_event(
+        _event(), confidence="high", recurrence=events.recurrence(conn, 49.32, 6.15)
+    )["reasons"]
+    assert any("de jour comme de nuit" in motif for motif, _ in raisons), raisons
+    assert sum(points for _, points in raisons if points < 0) == -40
+
+
+def test_recurrence_regarde_les_cases_voisines():
+    """Un site industriel change de case selon l'angle de visée : les 8 voisines comptent."""
+    conn = db.connect(":memory:")
+    _allume(conn, 51.040, 2.300, jours=3, frp=7.0)
+    assert events.recurrence(conn, 51.048, 2.308)["days"] == 3, "la case voisine doit compter"
+    assert events.recurrence(conn, 51.200, 2.300)["days"] == 0, "au-delà, non"
+
+
+def _foyer(latitude, longitude, **extra):
+    return {
+        "id": extra.pop("id", 1), "latitude": latitude, "longitude": longitude,
+        "priority": extra.pop("priority", "critical"), "risk_score": extra.pop("risk_score", 90.0),
+        "max_frp": extra.pop("max_frp", 50.0), "department_code": "33",
+        "last_seen": db.to_sql(db.now_utc()), **extra,
+    }
+
+
+def test_secteurs_regroupent_les_foyers_proches():
+    proches = [_foyer(44.90, -0.96, id=1), _foyer(44.92, -0.97, id=2), _foyer(44.93, -0.96, id=3)]
+    assert len(events.sectors(proches)) == 1, "moins de 5 km : un seul secteur"
+
+    eloignes = [_foyer(44.90, -0.96, id=1), _foyer(44.72, -0.85, id=2), _foyer(44.95, -1.10, id=3)]
+    assert len(events.sectors(eloignes)) == 3
+
+
+def test_une_seule_alerte_par_secteur():
+    """Huit messages pour un seul sinistre, c'est crier — et un système qui crie finit ignoré."""
+    conn = _base_avec_evenement()
+    conn.execute(
+        "INSERT INTO fire_events (first_seen, last_seen, latitude, longitude, hotspot_count,"
+        " source_count, max_frp, department_code, risk_score, priority)"
+        " SELECT first_seen, last_seen, 43.152, 6.352, 3, 1, 40.0, '83', 88.0, 'critical'"
+        "   FROM fire_events WHERE id = 1"
+    )
+    conn.commit()
+    assert len(alerts.pending_events(conn)) == 2
+
+    envoyees = alerts.send_alerts(conn)
+    assert len(envoyees) == 2, "les deux foyers sont tracés"
+    charges = {r[0] for r in conn.execute("SELECT payload FROM alerts")}
+    assert len(charges) == 1, "mais un seul message a été composé"
+    assert "2 foyers groupés" in charges.pop()
+
+    assert alerts.send_alerts(conn) == [], "le cooldown s'applique bien aux deux"
+
+
+def test_message_secteur_cite_le_foyer_le_plus_fort():
+    message = alerts.format_sector_message([
+        _foyer(44.90, -0.96, id=1, max_frp=135.0, risk_score=100.0),
+        _foyer(44.92, -0.97, id=2, max_frp=36.0, risk_score=95.0, priority="high"),
+    ])
+    assert "2 foyers groupés — CRITICAL" in message
+    assert "FRP cumulé : 171 MW" in message
+    assert "135 MW à 44.90000, -0.96000" in message
+    assert "ne remplace pas les secours" in message
+
+
 def test_summarize_agrege_le_groupe():
     summary = events.summarize(
         [

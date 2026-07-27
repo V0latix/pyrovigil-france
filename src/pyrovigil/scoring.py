@@ -17,6 +17,17 @@ from .db import from_sql, now_utc
 # §10.3 — seuils de priorité
 THRESHOLDS = [(75, "critical"), (55, "high"), (30, "medium"), (float("-inf"), "low")]
 
+# Sites récurrents. Mesuré sur les premières données : les cases allumées trois jours sur trois à
+# faible puissance sont nommables — Dunkerque (51,04/2,30), vallée de la Fensch (49,32/6,15),
+# Porcheville–Limay (48,98/1,76) — et plafonnent à 14 MW, quand les vrais feux font 100 à 555 MW.
+# Le plafond FRP est ce qui rend la règle sûre : il garantit qu'un incendie qui dure plusieurs jours
+# n'est jamais pénalisé, sa puissance le disqualifiant de la règle. Pénaliser le FRP faible seul
+# serait l'erreur inverse — un feu qui démarre est faible, et le détecter tôt est tout l'objet du
+# projet. C'est la faiblesse *répétée au même endroit* qui trahit une installation industrielle.
+RECURRENCE_WINDOW_DAYS = 30
+RECURRENCE_MIN_DAYS = 3
+RECURRENCE_MAX_FRP = 15.0
+
 
 def _freshness(age_minutes: float) -> list[tuple[str, int]]:
     if age_minutes < 30:
@@ -78,7 +89,32 @@ def _cluster(pixel_count: int, source_count: int) -> list[tuple[str, int]]:
     return reasons
 
 
-def score_event(event: dict, confidence: str | None = None, now: datetime | None = None) -> dict:
+def _recurrence(history: dict | None) -> list[tuple[str, int]]:
+    """Malus quand le lieu s'allume régulièrement sans jamais chauffer : usine, torchère, carrière.
+
+    Sans historique, le critère vaut 0 — un départ de feu sur un site vierge n'est jamais pénalisé.
+    """
+    if not history or not history.get("days"):
+        return []
+
+    days, max_frp = history["days"], history.get("max_frp") or 0.0
+    if days < RECURRENCE_MIN_DAYS or max_frp >= RECURRENCE_MAX_FRP:
+        return []
+
+    motif = f"site allumé {days} jours sur {RECURRENCE_WINDOW_DAYS}, jamais au-dessus de {max_frp:.0f} MW"
+    if history.get("night") and history.get("day_pass"):
+        # une source vue au passage de nuit *et* à celui de jour brûle en continu : c'est le motif
+        # exact de Dunkerque, détectée à 00, 01, 02, 03, 09, 11 et 13 h
+        return [(f"{motif}, de jour comme de nuit", -40)]
+    return [(motif, -30)]
+
+
+def score_event(
+    event: dict,
+    confidence: str | None = None,
+    now: datetime | None = None,
+    recurrence: dict | None = None,
+) -> dict:
     """Calcule score, priorité et justification d'un événement.
 
     `event` accepte une ligne de fire_events (sqlite3.Row convertie en dict) ou un résumé de
@@ -99,8 +135,9 @@ def score_event(event: dict, confidence: str | None = None, now: datetime | None
     reasons += _cluster(
         event.get("pixel_count") or event.get("hotspot_count") or 1, event.get("source_count") or 1
     )
-    # ponytail: critères météo (vent, humidité, Météo des forêts) et détection des zones industrielles
-    # non implémentés en v1 — ils s'ajoutent ici sans toucher au reste.
+    reasons += _recurrence(recurrence)
+    # ponytail: critères météo (vent, humidité, Météo des forêts) non implémentés en v1 — ils
+    # s'ajoutent ici sans toucher au reste.
 
     total = sum(points for _, points in reasons)
     return {

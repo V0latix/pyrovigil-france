@@ -15,8 +15,8 @@ from collections import Counter
 
 from shapely.geometry import MultiPoint
 
-from .db import from_sql, to_sql
-from .scoring import score_event
+from .db import cell, from_sql, to_sql
+from .scoring import RECURRENCE_WINDOW_DAYS, score_event
 
 # Le briefing (§9.2) disait 1500 m, calibré sur les pixels VIIRS de 375 m. MTG l'a invalidé : sa
 # grille géostationnaire espace les pixels de 1049 m et 1711 m à nos latitudes (mesuré), et deux
@@ -27,6 +27,11 @@ from .scoring import score_event
 # voisin dès 2100 m et plus rien ne change jusqu'à 3000 m, on ne fusionnerait que des feux distincts.
 CLUSTER_DISTANCE_M = 2000
 CLUSTER_MINUTES = 90
+
+# Rayon de regroupement des événements en secteurs, pour l'alerte et l'affichage. Mesuré sur les
+# 86 événements girondins du 27/07/2026 : 5, 10 et 15 km donnent exactement 3 secteurs. La structure
+# spatiale est nette, le rayon n'est pas critique — on prend le plus petit qui la révèle.
+SECTOR_DISTANCE_M = 5000
 
 # Fenêtre de recalcul. Plus large que 24 h pour qu'un feu qui dure reste un seul événement.
 DEFAULT_WINDOW_HOURS = 48
@@ -42,14 +47,14 @@ def haversine_m(lat1: float, lon1: float, lat2: float, lon2: float) -> float:
     return 2 * EARTH_RADIUS_M * math.asin(math.sqrt(a))
 
 
-def cluster(hotspots: list[dict]) -> list[list[dict]]:
-    """Regroupe des hotspots par proximité spatio-temporelle (union-find).
+def _groups(items: list[dict], linked) -> list[list[dict]]:
+    """Regroupe par transitivité les éléments que `linked(a, b)` déclare liés (union-find).
 
     ponytail: comparaison naïve de toutes les paires, O(n²). La France produit quelques centaines de
     hotspots par fenêtre de 48 h, soit un temps de calcul négligeable. Passer à un index spatial
     (Shapely STRtree, déjà présent dans geo.py) au-delà de ~2000 points par passe.
     """
-    parent = list(range(len(hotspots)))
+    parent = list(range(len(items)))
 
     def find(i: int) -> int:
         while parent[i] != i:
@@ -57,25 +62,65 @@ def cluster(hotspots: list[dict]) -> list[list[dict]]:
             i = parent[i]
         return i
 
-    def union(i: int, j: int) -> None:
-        ri, rj = find(i), find(j)
-        if ri != rj:
-            parent[max(ri, rj)] = min(ri, rj)
+    for i in range(len(items)):
+        for j in range(i + 1, len(items)):
+            if linked(items[i], items[j]):
+                ri, rj = find(i), find(j)
+                if ri != rj:
+                    parent[max(ri, rj)] = min(ri, rj)
 
-    for i in range(len(hotspots)):
-        a = hotspots[i]
-        for j in range(i + 1, len(hotspots)):
-            b = hotspots[j]
-            minutes = abs((a["time"] - b["time"]).total_seconds()) / 60
-            if minutes > CLUSTER_MINUTES:
-                continue
-            if haversine_m(a["latitude"], a["longitude"], b["latitude"], b["longitude"]) <= CLUSTER_DISTANCE_M:
-                union(i, j)
+    grouped: dict[int, list[dict]] = {}
+    for i, item in enumerate(items):
+        grouped.setdefault(find(i), []).append(item)
+    return list(grouped.values())
 
-    groups: dict[int, list[dict]] = {}
-    for i, hotspot in enumerate(hotspots):
-        groups.setdefault(find(i), []).append(hotspot)
-    return list(groups.values())
+
+def cluster(hotspots: list[dict]) -> list[list[dict]]:
+    """Regroupe des hotspots par proximité spatio-temporelle."""
+
+    def linked(a: dict, b: dict) -> bool:
+        if abs((a["time"] - b["time"]).total_seconds()) / 60 > CLUSTER_MINUTES:
+            return False
+        return haversine_m(a["latitude"], a["longitude"], b["latitude"], b["longitude"]) <= CLUSTER_DISTANCE_M
+
+    return _groups(hotspots, linked)
+
+
+def sectors(fire_events: list[dict], radius_m: float = SECTOR_DISTANCE_M) -> list[list[dict]]:
+    """Regroupe des événements voisins en secteurs, sur la seule distance.
+
+    Un grand incendie et ses reprises produisent plusieurs événements distincts — physiquement
+    justifiés, mais qui n'appellent qu'une seule notification. Le secteur ne remplace pas
+    l'événement : il ne vit que le temps d'une alerte ou d'un rendu de carte, et rien n'est stocké.
+
+    ponytail: aucune contrainte de temps ici, contrairement à `cluster`. Les événements candidats
+    sont déjà filtrés sur leur fraîcheur par `alerts.pending_events` et par la fenêtre de la carte.
+    """
+
+    def linked(a: dict, b: dict) -> bool:
+        return haversine_m(a["latitude"], a["longitude"], b["latitude"], b["longitude"]) <= radius_m
+
+    return _groups(fire_events, linked)
+
+
+def recurrence(conn: sqlite3.Connection, latitude: float, longitude: float) -> dict:
+    """Historique d'allumage de la case du point et de ses 8 voisines.
+
+    Les voisines comptent : la géolocalisation des pixels varie d'un passage à l'autre, et un même
+    site industriel change de case selon l'angle de visée du satellite.
+    """
+    lat_cell, lon_cell = cell(latitude, longitude)
+    row = conn.execute(
+        """
+        SELECT count(DISTINCT day) AS days, max(max_frp) AS max_frp,
+               max(night) AS night, max(day_pass) AS day_pass
+          FROM hot_cells
+         WHERE lat_cell BETWEEN ? AND ? AND lon_cell BETWEEN ? AND ?
+           AND day >= date('now', ?)
+        """,
+        (lat_cell - 1, lat_cell + 1, lon_cell - 1, lon_cell + 1, f"-{RECURRENCE_WINDOW_DAYS} days"),
+    ).fetchone()
+    return dict(row)
 
 
 def summarize(group: list[dict]) -> dict:
@@ -211,7 +256,11 @@ def rebuild_events(conn: sqlite3.Connection, window_hours: int = DEFAULT_WINDOW_
 
             # recalcul sur *tous* les hotspots de l'événement : ceux sortis de la fenêtre comptent encore
             summary = summarize(load_event_hotspots(conn, event_id))
-            assessment = score_event(summary, confidence=summary["confidence"])
+            assessment = score_event(
+                summary,
+                confidence=summary["confidence"],
+                recurrence=recurrence(conn, summary["latitude"], summary["longitude"]),
+            )
             conn.execute(
                 """
                 UPDATE fire_events

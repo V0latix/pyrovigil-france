@@ -9,6 +9,7 @@ from __future__ import annotations
 import json
 import os
 import sqlite3
+from collections import Counter
 from pathlib import Path
 
 from fastapi import Depends, FastAPI, Header, HTTPException, Query
@@ -191,6 +192,41 @@ def _footprints(conn: sqlite3.Connection, event_ids: list[int]) -> dict[int, lis
     ):
         grouped.setdefault(row["event_id"], []).append(dict(row))
     return {event_id: events.footprint(points) for event_id, points in grouped.items()}
+
+
+@app.get("/sectors.geojson")
+def sectors_geojson(
+    hours: int = Query(24, ge=1, le=720),
+    min_priority: str = Query("low", pattern="^(low|medium|high|critical)$"),
+    conn: sqlite3.Connection = Depends(get_db),
+):
+    """Enveloppe des foyers voisins : ce que l'œil doit voir comme un seul sinistre.
+
+    Les secteurs d'un seul foyer sont omis — ils n'ajouteraient rien à l'emprise de l'événement.
+    """
+    rows = [dict(event) for event in recent_events(hours=hours, min_priority=min_priority, conn=conn)]
+    features = []
+    for group in events.sectors(rows):
+        if len(group) < 2:
+            continue
+        fort = max(group, key=lambda e: e.get("max_frp") or 0)
+        departments = [e["department_code"] for e in group if e.get("department_code")]
+        features.append(
+            {
+                "type": "Feature",
+                # tampon large : le secteur est un repère de lecture, pas une emprise de feu
+                "geometry": {"type": "Polygon", "coordinates": [events.footprint(group, pad_m=2500)]},
+                "properties": {
+                    "fires": len(group),
+                    "sum_frp": round(sum(e.get("max_frp") or 0 for e in group), 1),
+                    "max_frp": fort.get("max_frp"),
+                    "priority": max(group, key=lambda e: PRIORITY_ORDER.get(e["priority"], -1))["priority"],
+                    "department_code": Counter(departments).most_common(1)[0][0] if departments else None,
+                    "last_seen": max(e["last_seen"] for e in group),
+                },
+            }
+        )
+    return {"type": "FeatureCollection", "features": features}
 
 
 @app.get("/hotspots.geojson")
