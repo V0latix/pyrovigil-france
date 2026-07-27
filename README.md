@@ -325,7 +325,7 @@ requêtes de `api.py`.
 ## Vérification
 
 ```bash
-uv run python tests/test_pyrovigil.py    # tourne aussi sous pytest
+uv run pytest                            # ou `uv run python tests/test_pyrovigil.py`
 ```
 
 53 vérifications : parsing FIRMS et MTG, déduplication, tolérance aux pannes de source, filtre France,
