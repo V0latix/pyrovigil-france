@@ -13,10 +13,19 @@ import math
 import sqlite3
 from collections import Counter
 
+from shapely.geometry import MultiPoint
+
 from .db import from_sql, to_sql
 from .scoring import score_event
 
-CLUSTER_DISTANCE_M = 1500
+# Le briefing (§9.2) disait 1500 m, calibré sur les pixels VIIRS de 375 m. MTG l'a invalidé : sa
+# grille géostationnaire espace les pixels de 1049 m et 1711 m à nos latitudes (mesuré), et deux
+# voisins diagonaux d'un pixel de 1387 m de côté sont à 1962 m. À 1500 m, un front de flammes se
+# fragmentait en autant d'événements que de pixels — 15 alertes pour deux feux, aucune confirmée par
+# plusieurs satellites puisque FIRMS et MTG tombaient dans des événements différents.
+# 2000 m couvre cette diagonale. Au-delà, la mesure plafonne : 82,7 % des pixels rejoignent leur
+# voisin dès 2100 m et plus rien ne change jusqu'à 3000 m, on ne fusionnerait que des feux distincts.
+CLUSTER_DISTANCE_M = 2000
 CLUSTER_MINUTES = 90
 
 # Fenêtre de recalcul. Plus large que 24 h pour qu'un feu qui dure reste un seul événement.
@@ -226,6 +235,34 @@ def rebuild_events(conn: sqlite3.Connection, window_hours: int = DEFAULT_WINDOW_
             )
 
     return {"events": len(groups), "created": created, "updated": updated, "merged": merged}
+
+
+DEGREE_M = 111_320  # mètres par degré de latitude
+PIXEL_PAD_M = 700  # demi-côté d'un pixel MTG : le point détecté représente une surface, pas un point
+
+
+def footprint(hotspots: list[dict], pad_m: float = PIXEL_PAD_M) -> list[list[float]]:
+    """Emprise au sol d'un événement, en anneau de coordonnées [lon, lat].
+
+    Enveloppe convexe des pixels, dilatée du rayon d'un pixel : un hotspot n'est pas un point mais
+    le centre d'une surface d'un à deux kilomètres de côté. Un événement à un seul pixel donne donc
+    un disque, deux pixels une gélule, N pixels le contour du front — un seul traitement pour les
+    trois cas.
+
+    ponytail: `pad_m` est fixe alors que l'empreinte réelle varie de 375 m (VIIRS) à ~1400 m (MTG).
+    Sur-estimer légèrement une zone de feu est le bon sens de l'erreur ; passer à l'empreinte par
+    pixel demanderait de la stocker, pour un contour à peine différent à l'écran.
+    """
+    latitude = sum(h["latitude"] for h in hotspots) / len(hotspots)
+    # 1° de longitude vaut cos(lat) fois moins de mètres qu'1° de latitude : sans cette mise à
+    # l'échelle, un tampon circulaire donnerait une ellipse à l'écran.
+    scale = math.cos(math.radians(latitude)) or 1.0
+    ring = (
+        MultiPoint([(h["longitude"] * scale, h["latitude"]) for h in hotspots])
+        .convex_hull.buffer(pad_m / DEGREE_M, quad_segs=6)
+        .exterior.coords
+    )
+    return [[round(x / scale, 5), round(y, 5)] for x, y in ring]
 
 
 def _storable(summary: dict) -> dict:

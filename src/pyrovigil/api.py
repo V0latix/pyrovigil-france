@@ -147,22 +147,50 @@ def events_geojson(
     min_priority: str = Query("low", pattern="^(low|medium|high|critical)$"),
     conn: sqlite3.Connection = Depends(get_db),
 ):
+    rows = recent_events(hours=hours, min_priority=min_priority, conn=conn)
+    zones = _footprints(conn, [event["id"] for event in rows])
+
     features = [
         {
             "type": "Feature",
-            "geometry": {"type": "Point", "coordinates": [event["longitude"], event["latitude"]]},
+            # Un feu occupe une surface. Le centroïde reste dans les propriétés : la carte s'en sert
+            # pour le marqueur, lisible aux échelles où l'emprise ferait moins d'un pixel d'écran.
+            "geometry": {"type": "Polygon", "coordinates": [zones[event["id"]]]},
             "properties": {
-                key: event[key]
-                for key in (
-                    "id", "priority", "risk_score", "first_seen", "last_seen", "hotspot_count",
-                    "source_count", "max_frp", "sum_frp", "in_forest", "forest_distance_m",
-                    "department_code", "score_detail",
-                )
+                "latitude": event["latitude"],
+                "longitude": event["longitude"],
+                **{
+                    key: event[key]
+                    for key in (
+                        "id", "priority", "risk_score", "first_seen", "last_seen", "hotspot_count",
+                        "source_count", "max_frp", "sum_frp", "in_forest", "forest_distance_m",
+                        "department_code", "score_detail",
+                    )
+                },
             },
         }
-        for event in recent_events(hours=hours, min_priority=min_priority, conn=conn)
+        for event in rows
+        if event["id"] in zones
     ]
     return {"type": "FeatureCollection", "features": features}
+
+
+def _footprints(conn: sqlite3.Connection, event_ids: list[int]) -> dict[int, list]:
+    """Emprise de chaque événement, en une requête plutôt qu'une par événement."""
+    if not event_ids:
+        return {}
+    placeholders = ",".join("?" * len(event_ids))
+    grouped: dict[int, list[dict]] = {}
+    for row in conn.execute(
+        f"""
+        SELECT eh.event_id, h.latitude, h.longitude
+          FROM event_hotspots eh JOIN raw_hotspots h ON h.id = eh.hotspot_id
+         WHERE eh.event_id IN ({placeholders})
+        """,
+        event_ids,
+    ):
+        grouped.setdefault(row["event_id"], []).append(dict(row))
+    return {event_id: events.footprint(points) for event_id, points in grouped.items()}
 
 
 @app.get("/hotspots.geojson")

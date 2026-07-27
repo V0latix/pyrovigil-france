@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import contextlib
 import json
+import math
 import sys
 import tempfile
 from datetime import datetime, timedelta, timezone
@@ -280,6 +281,47 @@ def test_cluster_separe_dans_le_temps():
     assert len(events.cluster(bridged)) == 1
 
 
+def test_cluster_regroupe_les_pixels_mtg_voisins():
+    """La grille MTG espace ses pixels de ~1050 et ~1710 m : à 1500 m un front se fragmentait."""
+    front = [_hotspot(44.877 + 0.015 * i, -0.890, satellite="MTG-I1") for i in range(4)]
+    ecarts = [events.haversine_m(a["latitude"], a["longitude"], b["latitude"], b["longitude"])
+              for a, b in zip(front, front[1:])]
+    assert all(1650 < e < 1750 for e in ecarts), ecarts
+    assert len(events.cluster(front)) == 1, "un front MTG contigu est un seul événement"
+
+    # deux foyers réellement distincts ne doivent pas fusionner pour autant
+    assert len(events.cluster([_hotspot(44.877, -0.890), _hotspot(44.920, -0.890)])) == 2
+
+
+def test_cluster_confirme_par_deux_satellites():
+    """Fragmenté, un feu vu par FIRMS et MTG perdait le bonus de confirmation croisée."""
+    groupes = events.cluster([
+        _hotspot(43.4900, 6.0550, satellite="N21"),
+        _hotspot(43.4760, 6.0520, satellite="MTG-I1", minutes_ago=5),
+    ])
+    assert len(groupes) == 1
+    assert events.summarize(groupes[0])["source_count"] == 2
+
+
+def test_emprise_au_sol():
+    """L'emprise est une surface : disque pour un pixel isolé, contour pour un front."""
+    anneau = events.footprint([_hotspot(43.15, 6.35)])
+    assert anneau[0] == anneau[-1], "un anneau GeoJSON est fermé"
+
+    lons = [p[0] for p in anneau]
+    lats = [p[1] for p in anneau]
+    # ~700 m de rayon, et un cercle à l'écran : même largeur au sol en longitude qu'en latitude
+    largeur_m = (max(lons) - min(lons)) * events.DEGREE_M * math.cos(math.radians(43.15))
+    hauteur_m = (max(lats) - min(lats)) * events.DEGREE_M
+    assert 1200 < hauteur_m < 1500, hauteur_m
+    assert abs(largeur_m - hauteur_m) < 60, (largeur_m, hauteur_m)
+
+    # un front de 3 pixels donne une emprise nettement plus longue que large
+    front = events.footprint([_hotspot(43.15 + 0.015 * i, 6.35) for i in range(3)])
+    etendue = (max(p[1] for p in front) - min(p[1] for p in front)) * events.DEGREE_M
+    assert etendue > 4000, etendue
+
+
 def test_summarize_agrege_le_groupe():
     summary = events.summarize(
         [
@@ -446,6 +488,56 @@ def test_realerte_si_le_score_progresse():
     conn.commit()
     assert len(alerts.send_alerts(conn)) == 1, "un feu qui grossit nettement justifie un second message"
     assert conn.execute("SELECT count(*) FROM alerts").fetchone()[0] == 2
+
+
+def test_alerte_discord_envoie_un_user_agent():
+    """Discord répond 403 au `Python-urllib/x.y` par défaut : sans User-Agent, rien ne part jamais."""
+    import urllib.request
+
+    vus = {}
+
+    class FausseReponse:
+        status = 204
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *a):
+            return False
+
+    def capture(request, timeout=None):
+        vus["headers"] = {k.lower(): v for k, v in request.header_items()}
+        vus["url"] = request.full_url
+        return FausseReponse()
+
+    original = urllib.request.urlopen
+    urllib.request.urlopen = capture
+    try:
+        conn = _base_avec_evenement()
+        envoyees = alerts.send_alerts(conn, "https://discord.com/api/webhooks/1/x")
+    finally:
+        urllib.request.urlopen = original
+
+    assert envoyees[0]["status"] == "sent", envoyees
+    assert "pyrovigil" in vus["headers"].get("user-agent", "").lower(), vus["headers"]
+
+
+def test_alerte_en_echec_ne_declenche_pas_le_cooldown():
+    """Une alerte jamais arrivée ne doit pas en bloquer une autre pendant 2 h."""
+    conn = _base_avec_evenement()
+
+    # simule un envoi qui a échoué, comme lors d'une panne Discord
+    conn.execute(
+        "INSERT INTO alerts (event_id, channel, payload, risk_score_at_send, delivery_status)"
+        " VALUES (1, 'discord', '{}', 90.0, 'failed')"
+    )
+    conn.commit()
+    assert len(alerts.pending_events(conn)) == 1, "l'événement doit rester à alerter"
+
+    # une fois réellement envoyée en revanche, le cooldown s'applique
+    conn.execute("UPDATE alerts SET delivery_status = 'sent'")
+    conn.commit()
+    assert alerts.pending_events(conn) == []
 
 
 def test_message_alerte_contient_l_essentiel():

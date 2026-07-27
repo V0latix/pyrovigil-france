@@ -23,15 +23,23 @@ MAX_AGE_MINUTES = 60
 COOLDOWN_HOURS = 2
 RESCORE_DELTA = 20  # points de progression qui justifient une réalerte avant la fin du cooldown
 
+# Discord répond 403 au `Python-urllib/x.y` par défaut d'urllib — leur API exige un User-Agent
+# identifiant l'application. Sans cet en-tête, aucune alerte n'est jamais partie.
+USER_AGENT = "PyroVigil (+https://github.com/V0latix/pyrovigil-france)"
+
 
 def pending_events(conn: sqlite3.Connection) -> list[dict]:
     """Événements qui méritent une alerte maintenant."""
     rows = conn.execute(
         f"""
+        -- `delivery_status <> 'failed'` : une alerte qui n'est jamais arrivée ne doit pas déclencher
+        -- le cooldown, sinon une panne Discord passagère fait perdre l'information pendant 2 h
         SELECT e.*,
-               (SELECT max(a.sent_at) FROM alerts a WHERE a.event_id = e.id) AS last_alert_at,
+               (SELECT max(a.sent_at) FROM alerts a
+                 WHERE a.event_id = e.id AND a.delivery_status <> 'failed') AS last_alert_at,
                (SELECT a.risk_score_at_send FROM alerts a
-                 WHERE a.event_id = e.id ORDER BY a.sent_at DESC LIMIT 1) AS last_alert_score
+                 WHERE a.event_id = e.id AND a.delivery_status <> 'failed'
+                 ORDER BY a.sent_at DESC LIMIT 1) AS last_alert_score
           FROM fire_events e
          WHERE e.priority IN ({','.join('?' * len(ALERT_PRIORITIES))})
            AND e.last_seen > datetime('now', ?)
@@ -81,7 +89,7 @@ def _post_discord(webhook_url: str, content: str) -> None:
     request = urllib.request.Request(
         webhook_url,
         data=json.dumps({"content": content}).encode(),
-        headers={"Content-Type": "application/json"},
+        headers={"Content-Type": "application/json", "User-Agent": USER_AGENT},
         method="POST",
     )
     with urllib.request.urlopen(request, timeout=10):

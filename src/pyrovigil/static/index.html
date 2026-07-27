@@ -145,7 +145,11 @@ map.addControl(new maplibregl.NavigationControl(), 'top-right');
 map.addControl(new maplibregl.ScaleControl(), 'bottom-right');
 
 map.on('load', () => {
+  // deux sources pour la même donnée : l'emprise au sol (polygones) et le centroïde (points).
+  // À l'échelle de la France, une zone d'un kilomètre fait moins d'un pixel d'écran — le marqueur
+  // reste donc nécessaire pour repérer un feu, et la zone prend le relais en zoomant.
   map.addSource('events', { type: 'geojson', data: EMPTY });
+  map.addSource('events-points', { type: 'geojson', data: EMPTY });
   map.addSource('hotspots', { type: 'geojson', data: EMPTY });
 
   map.addLayer({
@@ -158,12 +162,32 @@ map.on('load', () => {
     }
   });
 
+  const parPriorite = [
+    'match', ['get', 'priority'],
+    'critical', COLORS.critical, 'high', COLORS.high, 'medium', COLORS.medium, COLORS.low
+  ];
+  // rayon du marqueur : proportionnel au score, mais rétréci en zoomant pour laisser voir la zone
+  const rayon = (f) => ['interpolate', ['linear'], ['get', 'risk_score'], 0, 5 * f, 100, 17 * f];
+
+  // l'emprise au sol du feu : enveloppe des pixels chauds, dilatée d'un rayon de pixel
+  map.addLayer({
+    id: 'events-zone', type: 'fill', source: 'events',
+    paint: { 'fill-color': parPriorite, 'fill-opacity': 0.22 }
+  });
+
+  map.addLayer({
+    id: 'events-zone-contour', type: 'line', source: 'events',
+    paint: { 'line-color': parPriorite, 'line-width': 1.5, 'line-opacity': 0.8 }
+  });
+
   // halo sous les événements prioritaires, pour les repérer au premier coup d'œil
   map.addLayer({
-    id: 'events-halo', type: 'circle', source: 'events',
+    id: 'events-halo', type: 'circle', source: 'events-points',
     filter: ['in', ['get', 'priority'], ['literal', ['high', 'critical']]],
     paint: {
-      'circle-radius': ['interpolate', ['linear'], ['get', 'risk_score'], 0, 12, 100, 34],
+      'circle-radius': ['interpolate', ['linear'], ['zoom'],
+        8, ['interpolate', ['linear'], ['get', 'risk_score'], 0, 12, 100, 34],
+        13, ['interpolate', ['linear'], ['get', 'risk_score'], 0, 4, 100, 11]],
       'circle-color': ['match', ['get', 'priority'], 'critical', COLORS.critical, COLORS.high],
       'circle-opacity': 0.18,
       'circle-blur': 0.5
@@ -171,21 +195,20 @@ map.on('load', () => {
   });
 
   map.addLayer({
-    id: 'events', type: 'circle', source: 'events',
+    id: 'events', type: 'circle', source: 'events-points',
     paint: {
-      'circle-radius': ['interpolate', ['linear'], ['get', 'risk_score'], 0, 5, 100, 17],
-      'circle-color': [
-        'match', ['get', 'priority'],
-        'critical', COLORS.critical, 'high', COLORS.high, 'medium', COLORS.medium, COLORS.low
-      ],
+      'circle-radius': ['interpolate', ['linear'], ['zoom'], 8, rayon(1), 13, rayon(0.35)],
+      'circle-color': parPriorite,
       'circle-opacity': 0.9,
       'circle-stroke-width': 1.5,
       'circle-stroke-color': '#14161a'
     }
   });
 
-  map.on('click', 'events', (e) => openPopup(e.features[0].properties));
-  for (const layer of ['events', 'hotspots']) {
+  for (const layer of ['events', 'events-zone']) {
+    map.on('click', layer, (e) => openPopup(e.features[0].properties));
+  }
+  for (const layer of ['events', 'events-zone', 'hotspots']) {
     map.on('mouseenter', layer, () => map.getCanvas().style.cursor = 'pointer');
     map.on('mouseleave', layer, () => map.getCanvas().style.cursor = '');
   }
@@ -215,6 +238,14 @@ function render() {
   const hotspotFeatures = allHotspots.filter(f => utc(f.properties.acquisition_time) >= cutoff);
 
   map.getSource('events').setData({ type: 'FeatureCollection', features: eventFeatures });
+  map.getSource('events-points').setData({
+    type: 'FeatureCollection',
+    features: eventFeatures.map(f => ({
+      type: 'Feature',
+      geometry: { type: 'Point', coordinates: [f.properties.longitude, f.properties.latitude] },
+      properties: f.properties
+    }))
+  });
   map.getSource('hotspots').setData({ type: 'FeatureCollection', features: hotspotFeatures });
   events = eventFeatures.map(f => f.properties);
   renderList();

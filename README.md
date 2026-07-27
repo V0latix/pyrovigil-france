@@ -215,6 +215,27 @@ l'ordre de 53° depuis l'orbite à 0° de longitude : les pixels y font entre 1,
 Le même répertoire publie chaque créneau en `.csv.gz` et en `.nc`. On lit le CSV : `urllib`, `gzip` et `csv`
 de la stdlib suffisent, là où le NetCDF imposerait `netCDF4` pour la même information.
 
+### Un feu est une surface, pas un point
+
+Le briefing regroupait les pixels chauds distants de moins de **1 500 m**, seuil calibré sur les pixels
+VIIRS de 375 m. MTG l'a invalidé : sa grille géostationnaire espace les pixels de **1 049 m et 1 711 m** à
+nos latitudes, et deux voisins diagonaux d'un pixel de 1 387 m de côté sont à 1 962 m. Un front de flammes
+se fragmentait donc en autant d'événements que de pixels — mesuré sur un vrai feu du Var et un de Gironde :
+**15 alertes pour deux incendies**, et aucun événement confirmé par deux satellites, puisque FIRMS et MTG
+tombaient dans des événements séparés.
+
+Le seuil est passé à **2 000 m**, qui couvre cette diagonale. Au-delà la mesure plafonne : 82,7 % des
+pixels rejoignent leur voisin dès 2 100 m, et rien ne bouge jusqu'à 3 000 m — on ne fusionnerait plus que
+des feux distincts. Sur les mêmes données, le foyer du Var est repassé de 4 événements à 1 seul de
+19 pixels à 555 MW, et la Gironde de 10 à 5.
+
+`events.geojson` publie donc une **emprise au sol** et non un point : enveloppe convexe des pixels chauds,
+dilatée du rayon d'un pixel, car un hotspot est le centre d'une surface d'un à deux kilomètres de côté. Un
+événement à un pixel donne un disque, deux pixels une gélule, N pixels le contour du front — le même
+traitement pour les trois cas, en trois lignes de Shapely déjà installé. Le centroïde reste dans les
+propriétés : à l'échelle de la France une zone d'un kilomètre fait moins d'un pixel d'écran, et le marqueur
+reste nécessaire pour repérer un feu. La zone prend le relais en zoomant.
+
 ## La couche forêt
 
 Rien à installer : chaque hotspot situé en France est confronté au
@@ -257,8 +278,9 @@ requêtes de `api.py`.
 uv run python tests/test_pyrovigil.py    # tourne aussi sous pytest
 ```
 
-38 vérifications : parsing FIRMS et MTG, déduplication, tolérance aux pannes de source, filtre France,
-distance à la forêt, clustering, stabilité des identifiants d'événements, barème de score, purge, anti-spam.
+43 vérifications : parsing FIRMS et MTG, déduplication, tolérance aux pannes de source, filtre France,
+distance à la forêt, clustering et emprise au sol, stabilité des identifiants d'événements, barème de
+score, purge, anti-spam et livraison Discord.
 
 ## Limites
 
