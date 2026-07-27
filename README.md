@@ -127,13 +127,20 @@ Le plan Hobby limite les cron jobs à **une exécution par jour**, et une expres
 échouer le déploiement. GitHub Actions descend à 5 minutes, gratuitement — c'est ce qui rend possible la
 boucle MTG à 10 minutes.
 
-### Trois limites à connaître
+### Quatre limites à connaître
 
-**Les tâches planifiées GitHub sont retardées sous charge.** `*/10` veut dire « environ toutes les 10
-minutes », pas « à la minute ». Et GitHub ne garde **qu'une seule exécution en attente** par groupe de
+**Le dépôt doit être public**, et ce n'est pas qu'une question de licence. Sur un dépôt **privé**, les
+minutes Actions sont plafonnées (2 000/mois en plan Free) : `*/10` en consommerait à lui seul ~4 400. Et
+surtout, GitHub y déprioritise fortement les tâches planifiées — mesuré sur ce dépôt avant sa bascule en
+public, `*/10` n'a tiré que **10 fois en 18 heures**, avec un trou de 3 h 50, soit la cadence du workflow
+horaire pour rien. Sur un dépôt public, les minutes sont illimitées et la planification bien plus fidèle.
+
+**Les tâches planifiées restent retardées sous charge**, même en public : `*/10` veut dire « environ toutes
+les 10 minutes », pas « à la minute ». Et GitHub ne garde **qu'une seule exécution en attente** par groupe de
 concurrence : pendant que le job horaire tourne, un job rapproché peut être écarté. Sans gravité, le suivant
 arrive dans 10 minutes et l'ingestion MTG reprend systématiquement la dernière heure de créneaux. En
-pratique, compter 30 à 40 minutes de latence d'alerte plutôt que les 20 minutes du produit brut.
+pratique, compter 30 à 40 minutes de latence d'alerte plutôt que les 20 minutes du produit brut. Pour une
+vraie cadence de 10 minutes, la boucle cron locale de la section [Démarrage](#démarrage) est plus fiable.
 
 **La base grossit** — de l'ordre d'1 Mo par jour pour FIRMS seul, davantage avec MTG, qui réobserve un feu
 persistant toutes les 10 minutes. Elle est téléchargée et renvoyée à chaque exécution, d'où la purge des
