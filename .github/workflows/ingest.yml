@@ -60,6 +60,10 @@ jobs:
       - name: Ingestion, clustering, scoring, alertes
         env:
           FIRMS_MAP_KEY: ${{ secrets.FIRMS_MAP_KEY }}
+          # aussi ici : `--source all` reprend la dernière heure de créneaux MTG, ce qui rattrape
+          # les exécutions de ingest-fast.yml que GitHub a retardées ou écartées
+          LSASAF_USER: ${{ secrets.LSASAF_USER }}
+          LSASAF_PASSWORD: ${{ secrets.LSASAF_PASSWORD }}
           DISCORD_WEBHOOK_URL: ${{ secrets.DISCORD_WEBHOOK_URL }}
           # jamais interpolé directement dans la commande : argparse rejette ensuite tout ce qui n'est pas entier
           DAYS: ${{ inputs.days || '1' }}

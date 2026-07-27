@@ -108,7 +108,7 @@ d'aucun backend : les fichiers statiques suffisent, et la même page fonctionne 
 | Secret | Nécessaire ? | Rôle |
 |---|---|---|
 | `FIRMS_MAP_KEY` | **oui** | sans elle, `ingest.yml` n'a plus que MTG |
-| `LSASAF_USER`, `LSASAF_PASSWORD` | pour `ingest-fast.yml` | sans eux, la source MTG est ignorée et la latence reste celle de FIRMS |
+| `LSASAF_USER`, `LSASAF_PASSWORD` | pour les **deux** workflows | sans eux, la source MTG est ignorée et la latence reste celle de FIRMS |
 | `VERCEL_TOKEN`, `VERCEL_ORG_ID`, `VERCEL_PROJECT_ID` | non | sans eux, l'export part en artefact du workflow au lieu d'être déployé |
 | `DISCORD_WEBHOOK_URL` | non | sans lui, les alertes sont seulement journalisées |
 
