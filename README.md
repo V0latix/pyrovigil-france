@@ -97,6 +97,12 @@ reste donc horaire ; c'est l'**alerte Discord** qui descend à une trentaine de 
 
 Les deux partagent le groupe `concurrency: ingest`, puisqu'ils écrivent la même base.
 
+`ingest.yml` est le **seul** chemin de déploiement : [`vercel.json`](vercel.json) coupe les déploiements
+automatiques de l'intégration Git (`git.deploymentEnabled: false`). Un build déclenché par un push
+part de la racine du dépôt, où il n'y a ni page ni base — il passait en production et servait un 404
+jusqu'à l'exécution horaire suivante. Accessoirement, cela divise par deux la consommation du quota
+Hobby de 100 déploiements par jour.
+
 La base SQLite vit comme **asset d'une Release GitHub** : mutable, gratuit, et sans impact sur l'historique
 git — un `.db` commité ajouterait plusieurs mégaoctets de binaire à chaque passage.
 
