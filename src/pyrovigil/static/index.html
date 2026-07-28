@@ -322,16 +322,11 @@ function renderList() {
       </span>
       <span class="meta">${ago(properties.last_seen)} · ${details.join(' · ')}</span>`;
     item.onclick = () => {
-      const feature = events.find(e => e.id === properties.id);
-      map.flyTo({ center: coordsOf(properties.id), zoom: 11 });
-      openPopup(feature);
+      map.flyTo({ center: [properties.longitude, properties.latitude], zoom: 11 });
+      openPopup(properties);
     };
     list.appendChild(item);
   }
-}
-
-function coordsOf(id) {
-  return allEvents.find(f => f.properties.id === id).geometry.coordinates;
 }
 
 function openPopup(properties) {
@@ -348,7 +343,8 @@ function openPopup(properties) {
     ['Département', properties.department_code || '—'],
     ['Forêt', forest || 'donnée absente']
   ];
-  const coordinates = coordsOf(properties.id);
+  // la géométrie de l'événement est un polygone : le centroïde ne se lit que dans les propriétés
+  const coordinates = [properties.longitude, properties.latitude];
   new maplibregl.Popup({ offset: 14, maxWidth: '320px' })
     .setLngLat(coordinates)
     .setHTML(`
